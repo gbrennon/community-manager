@@ -12,6 +12,29 @@ dependencies = []
 [project.scripts]
 communiy-manager = "community_manager:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=7.1.0",
+    "vcrpy>=7",
+]
+
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--cov=community_manager",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+

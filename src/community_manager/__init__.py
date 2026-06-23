@@ -1,2 +1,6 @@
+from community_manager.cli import run
+
+
 def main() -> None:
-    print("Hello from uv-tempate!")
+    run()
+
