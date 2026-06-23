@@ -1,0 +1,94 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/vnd.github+json
+      Connection:
+      - close
+      Host:
+      - api.github.com
+      User-Agent:
+      - community-manager
+    method: GET
+    uri: https://api.github.com/repos/cline/cline/issues/11761
+  response:
+    body:
+      string: "{\"url\":\"https://api.github.com/repos/cline/cline/issues/11761\",\"repository_url\":\"https://api.github.com/repos/cline/cline\",\"labels_url\":\"https://api.github.com/repos/cline/cline/issues/11761/labels{/name}\",\"comments_url\":\"https://api.github.com/repos/cline/cline/issues/11761/comments\",\"events_url\":\"https://api.github.com/repos/cline/cline/issues/11761/events\",\"html_url\":\"https://github.com/cline/cline/issues/11761\",\"id\":4729502474,\"node_id\":\"I_kwDOMSqWwc8AAAABGeZ7Cg\",\"number\":11761,\"title\":\"core
+        dumped when trying to exit\",\"user\":{\"login\":\"gbrennon\",\"id\":2373929,\"node_id\":\"MDQ6VXNlcjIzNzM5Mjk=\",\"avatar_url\":\"https://avatars.githubusercontent.com/u/2373929?v=4\",\"gravatar_id\":\"\",\"url\":\"https://api.github.com/users/gbrennon\",\"html_url\":\"https://github.com/gbrennon\",\"followers_url\":\"https://api.github.com/users/gbrennon/followers\",\"following_url\":\"https://api.github.com/users/gbrennon/following{/other_user}\",\"gists_url\":\"https://api.github.com/users/gbrennon/gists{/gist_id}\",\"starred_url\":\"https://api.github.com/users/gbrennon/starred{/owner}{/repo}\",\"subscriptions_url\":\"https://api.github.com/users/gbrennon/subscriptions\",\"organizations_url\":\"https://api.github.com/users/gbrennon/orgs\",\"repos_url\":\"https://api.github.com/users/gbrennon/repos\",\"events_url\":\"https://api.github.com/users/gbrennon/events{/privacy}\",\"received_events_url\":\"https://api.github.com/users/gbrennon/received_events\",\"type\":\"User\",\"user_view_type\":\"public\",\"site_admin\":false},\"labels\":[{\"id\":9414822871,\"node_id\":\"LA_kwDOMSqWwc8AAAACMSrL1w\",\"url\":\"https://api.github.com/repos/cline/cline/labels/CLI\",\"name\":\"CLI\",\"color\":\"d93f0b\",\"default\":false,\"description\":\"Issues
+        related to the Cline CLI\"}],\"state\":\"open\",\"locked\":false,\"assignees\":[],\"milestone\":null,\"comments\":1,\"created_at\":\"2026-06-23T20:59:20Z\",\"updated_at\":\"2026-06-23T20:59:30Z\",\"closed_at\":null,\"assignee\":null,\"author_association\":\"NONE\",\"issue_field_values\":[],\"type\":null,\"active_lock_reason\":null,\"sub_issues_summary\":{\"total\":0,\"completed\":0,\"percent_completed\":0},\"issue_dependencies_summary\":{\"blocked_by\":0,\"total_blocked_by\":0,\"blocking\":0,\"total_blocking\":0},\"body\":\"###
+        Cline Surface\\n\\nCLI\\n\\n### Cline Version\\n\\n3.0.29\\n\\n### Beta version\\n\\n-
+        [ ] I am using a beta version of Cline\\n\\n### What happened?\\n\\nit happened
+        5 times when trying to exit TUI Cline.[[[\\n\\nafter i press `Ctrl+c`(sigkill)
+        it crashes.\\n\\nscreenshot:\\n\\n<img width=\\\"3838\\\" height=\\\"769\\\"
+        alt=\\\"Image\\\" src=\\\"https://github.com/user-attachments/assets/628ed081-5885-46bf-928f-63518be89192\\\"
+        />\\n\\n\\n\\n### Steps to reproduce\\n\\n1. open cline\\n2. press `ctrl+c`\\n3.
+        raises `core dumped` error. idk if this is `bun` fault or `Cline`\\n\\n\\n###
+        Provider/Model\\n\\nthis is not related to model usage\\n\\n### IDE / CLI
+        Diagnostics\\n\\n> cline --version\\n3.0.29\\n\\n### System Information\\n\\nOS
+        \u279C  Fedora Linux 43 (i3) x86_64\\nKERNEL \u279C  Linux 6.19.8-200.fc43.x86_64\\nUPTIME
+        \u279C  1 day, 22 hours, 26 mins\\nPKGS \u279C  2524 (rpm), 67 (flatpak-system),
+        1 (flatpak-user)\\nSHELL \u279C  zsh 5.9\\nWM \u279C  i3 4.25.1 (2026-02-06)
+        (X11)\\nTERM \u279C  nvim\\nCPU \u279C  AMD Ryzen 7 7700X (16) @ 5.58 GHz\\nGPU
+        \u279C  NVIDIA GeForce RTX 5070 [Discrete]\\nMEM \u279C  16.98 GiB / 62.39
+        GiB (27%)\",\"closed_by\":null,\"reactions\":{\"url\":\"https://api.github.com/repos/cline/cline/issues/11761/reactions\",\"total_count\":0,\"+1\":0,\"-1\":0,\"laugh\":0,\"hooray\":0,\"confused\":0,\"heart\":0,\"rocket\":0,\"eyes\":0},\"timeline_url\":\"https://api.github.com/repos/cline/cline/issues/11761/timeline\",\"performed_via_github_app\":null,\"state_reason\":null,\"pinned_comment\":null}"
+    headers:
+      Accept-Ranges:
+      - bytes
+      Access-Control-Allow-Origin:
+      - '*'
+      Access-Control-Expose-Headers:
+      - ETag, Link, Location, Retry-After, X-GitHub-OTP, X-RateLimit-Limit, X-RateLimit-Remaining,
+        X-RateLimit-Used, X-RateLimit-Resource, X-RateLimit-Reset, X-OAuth-Scopes,
+        X-Accepted-OAuth-Scopes, X-Poll-Interval, X-GitHub-Media-Type, X-GitHub-SSO,
+        X-GitHub-Request-Id, Deprecation, Sunset, Warning
+      Cache-Control:
+      - public, max-age=60, s-maxage=60
+      Content-Length:
+      - '3554'
+      Content-Security-Policy:
+      - default-src 'none'
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Tue, 23 Jun 2026 23:29:50 GMT
+      ETag:
+      - W/"1f278111e77ca8d86f8c1df3d2ff00e4d5a1c49adfdf9f99206bc796d543e2a1"
+      Last-Modified:
+      - Tue, 23 Jun 2026 20:59:30 GMT
+      Referrer-Policy:
+      - origin-when-cross-origin, strict-origin-when-cross-origin
+      Server:
+      - github.com
+      Strict-Transport-Security:
+      - max-age=31536000; includeSubdomains; preload
+      Vary:
+      - Accept,Accept-Encoding, Accept, X-Requested-With
+      X-Content-Type-Options:
+      - nosniff
+      X-Frame-Options:
+      - deny
+      X-GitHub-Media-Type:
+      - github.v3; format=json
+      X-GitHub-Request-Id:
+      - BC30:15762:1FF6EA6:2217584:6A3B16ED
+      X-RateLimit-Limit:
+      - '60'
+      X-RateLimit-Remaining:
+      - '57'
+      X-RateLimit-Reset:
+      - '1782260280'
+      X-RateLimit-Resource:
+      - core
+      X-RateLimit-Used:
+      - '3'
+      X-XSS-Protection:
+      - '0'
+      connection:
+      - close
+      x-github-api-version-selected:
+      - '2022-11-28'
+    status:
+      code: 200
+      message: OK
+version: 1
