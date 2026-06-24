@@ -44,35 +44,49 @@ class ReviewResult:
 
 
 class IssueReviewer:
-    """Fetch an issue, launch a sandbox, install cline, reproduce steps, capture results."""
 
     def __init__(
         self,
         provider: SandboxProvider | None = None,
         config: SandboxConfig | None = None,
         fetcher: GitHubIssueFetcher | None = None,
+        debug: bool = False,
     ) -> None:
         self.config = config or SandboxConfig()
         self.provider = provider or DockerProvider(config=self.config)
         self.fetcher = fetcher or GitHubIssueFetcher()
+        self.debug = debug
+
+    def _log(self, *args: Any) -> None:
+        if self.debug:
+            print("[debug]", *args, flush=True)
 
     async def review(
         self, issue_url: str, *, project_dir: Path | None = None,
     ) -> ReviewResult:
+        self._log(f"Fetching {issue_url}")
         issue = self._fetch_issue_or_error(issue_url)
         if isinstance(issue, ReviewResult):
             return issue
 
-        reproduction_steps = parse_steps_from_issue_body(issue.body) or list(_FALLBACK_STEPS)
+        self._log(f"Issue: {issue.title}  cline_version={issue.cline_version!r}")
 
+        reproduction_steps = parse_steps_from_issue_body(issue.body) or list(_FALLBACK_STEPS)
+        self._log(f"Steps parsed: {len(reproduction_steps)}", reproduction_steps)
+
+        self._log("Launching sandbox...")
         sandbox_id = await self.provider.launch()
+        self._log(f"Sandbox launched: {sandbox_id}")
+
         result = ReviewResult(
             issue_url=issue_url, issue_title=issue.title,
             sandbox_id=sandbox_id, success=False,
         )
         try:
             await self._install_cline(sandbox_id, issue.cline_version)
+            self._log("Network: disconnecting...")
             await self.provider.disconnect_network(sandbox_id)
+            self._log("Network: severed")
 
             reproduced, crash_detected, step_log = await self._execute_steps(
                 sandbox_id, reproduction_steps,
@@ -84,9 +98,12 @@ class IssueReviewer:
             result.verdict = render_verdict(result)
             result.success = True
         except Exception as exc:
+            self._log(f"ERROR: {exc}")
             result.errors.append(str(exc))
         finally:
+            self._log(f"Destroying sandbox {sandbox_id}")
             await self.provider.destroy(sandbox_id)
+            self._log("Sandbox destroyed")
         return result
     async def review_many(
         self, urls: list[str], *, project_dir: Path | None = None,
@@ -100,6 +117,7 @@ class IssueReviewer:
                 fresh_provider = provider_cls(config=self.config)
                 reviewer = IssueReviewer(
                     provider=fresh_provider, config=self.config, fetcher=self.fetcher,
+                    debug=self.debug,
                 )
                 return await reviewer.review(url, project_dir=project_dir)
 
@@ -117,12 +135,14 @@ class IssueReviewer:
 
     async def _install_cline(self, sandbox_id: str, cline_version: str) -> None:
         package = f"cline@{cline_version}" if cline_version else "cline"
+        self._log(f"Installing {package} (this may take ~30s)...")
         result = await self.provider.exec(
             sandbox_id,
             ["npm", "install", "-g", package],
         )
         if result.exit_code != 0:
             raise RuntimeError(f"npm install -g {package} failed: {result.stderr}")
+        self._log(f"{package} installed")
 
     async def _execute_steps(
         self, sandbox_id: str, steps: list[str],
@@ -136,21 +156,25 @@ class IssueReviewer:
                 "step": index, "description": step_description, "ran": False,
             }
             command = convert_step_to_cline_command(step_description)
+            self._log(f"Step {index}: {command}")
             try:
                 result = await self.provider.exec(sandbox_id, command)
                 record["exit_code"] = result.exit_code
                 record["stdout"] = result.stdout[-2000:]
                 record["stderr"] = result.stderr[-2000:]
                 record["ran"] = True
+                self._log(f"  exit={result.exit_code} stdout={result.stdout[:100]}")
 
                 if process_exited_with_crash(result):
                     any_crash = True
                     record["crashed"] = True
+                    self._log(f"  <<< CRASH DETECTED >>>")
                     core_dump = await self.provider.exec(
                         sandbox_id,
                         ["sh", "-c", "coredumpctl list 2>/dev/null || echo none"],
                     )
                     record["core_dump"] = core_dump.stdout[:1000]
+                    self._log(f"  core_dump: {core_dump.stdout[:100]}")
             except Exception as exc:
                 record["error"] = str(exc)
                 every_step_ran = False
@@ -161,6 +185,7 @@ class IssueReviewer:
     def write_report(self, result: ReviewResult, output_path: Path | None = None) -> Path:
         path = output_path or Path("findings.md")
         path.write_text(render_markdown_report(result))
+        self._log(f"Report written to {path}")
         return path
 
 
