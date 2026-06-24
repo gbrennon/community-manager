@@ -24,15 +24,21 @@ class QemuProvider(SandboxProvider):
     async def launch(self) -> str:
         sandbox_id = f"cline-issue-{uuid.uuid4().hex[:12]}"
         sock = self.serial_socket_dir / f"{sandbox_id}.sock"
+
+        if not self.disk_image.exists():
+            raise RuntimeError(f"QEMU disk image not found: {self.disk_image}")
+
         net = ["-net", "none"] if not self.config.network_enabled else []
         proc = await asyncio.create_subprocess_exec(
-            "qemu-system-x86_64", "-enable-kvm",
+            "qemu-system-x86_64",
+            "-enable-kvm",
             "-m", self.config.memory.removesuffix("g") + "G",
             "-smp", str(self.config.cpus),
             "-drive", f"file={self.disk_image},if=virtio",
             *net,
             "-serial", f"unix:{sock},server,nowait",
-            "-nographic", "-daemonize",
+            "-display", "none",     # headless — replaces -nographic
+            "-daemonize",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )

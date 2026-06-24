@@ -107,19 +107,50 @@ def _run_review(
 
     config = SandboxConfig()
 
+    # Resolve provider: prefer containers (lighter, no disk image needed).
+    # Fall back to QEMU only when no container runtime is available.
+    has_container = _detect_container_runtime() != "docker" or shutil.which("docker")
+    has_qemu = _detect_qemu()
+
     if provider == "auto":
-        provider = "qemu" if _detect_qemu() else "container"
+        if has_container:
+            provider = "container"
+        elif has_qemu:
+            provider = "qemu"
+        else:
+            print(
+                "Error: no sandbox backend found. Install podman, docker,"
+                " or qemu-system-x86_64.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     if container_runtime == "auto":
         container_runtime = _detect_container_runtime()
 
     if provider == "qemu":
-        if not _detect_qemu():
+        if not has_qemu:
             print("Error: qemu-system-x86_64 not found on PATH", file=sys.stderr)
             sys.exit(1)
         from community_manager.sandbox.qemu_provider import QemuProvider
-        prov: object = QemuProvider(config=config)
+
+        qemu_prov = QemuProvider(config=config)
+        if not qemu_prov.disk_image.exists():
+            print(
+                f"Error: QEMU disk image not found at {qemu_prov.disk_image}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         backend_label = "qemu"
+        prov: object = qemu_prov
     else:
+        if not shutil.which(container_runtime):
+            print(
+                f"Error: {container_runtime} not found on PATH."
+                " Install podman or docker.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         prov = DockerProvider(config=config, binary=container_runtime)
         backend_label = container_runtime
 

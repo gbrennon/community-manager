@@ -1,0 +1,12 @@
+FROM node:22-slim
+
+# Create unprivileged user
+RUN useradd --create-home cline
+
+# Install TypeScript tooling as root, then switch
+RUN npm install -g typescript tsx vitest
+
+USER cline
+WORKDIR /home/cline
+
+CMD ["/bin/bash"]
