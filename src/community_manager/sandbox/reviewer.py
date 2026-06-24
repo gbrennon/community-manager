@@ -76,6 +76,13 @@ class IssueReviewer:
             await self.provider.copy_in(
                 sandbox_id, project_dir or Path.cwd(), self.config.workspace_dir,
             )
+
+            # Verify cline is available (pre‑baked in the sandbox image)
+            check = await self.provider.exec(sandbox_id, ["cline", "--version"])
+            if check.exit_code != 0:
+                result.errors.append(f"cline not found in sandbox: {check.stderr}")
+                return result
+
             reproduced, crash, log = await self._reproduce(sandbox_id, steps)
             result.reproduced = reproduced
             result.crash_observed = crash

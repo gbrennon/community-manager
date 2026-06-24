@@ -1,12 +1,16 @@
 FROM node:22-slim
 
-# Create unprivileged user
 RUN useradd --create-home cline
 
-# Install TypeScript tooling as root, then switch
-RUN npm install -g typescript tsx vitest
+# Install TypeScript tooling and cline globally as root (network available during build)
+RUN npm install -g typescript tsx vitest cline
+
+# Let the cline user install further packages if needed
+RUN mkdir -p /home/cline/.npm-global && chown -R cline:cline /home/cline/.npm-global
 
 USER cline
+ENV PATH=/home/cline/.npm-global/bin:$PATH
+ENV NPM_CONFIG_PREFIX=/home/cline/.npm-global
 WORKDIR /home/cline
 
 CMD ["/bin/bash"]
