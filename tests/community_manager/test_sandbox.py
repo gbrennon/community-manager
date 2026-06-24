@@ -153,6 +153,20 @@ class TestReviewRealIssueCrashSim:
         assert all(r.success for r in results)
 
     @pytest.mark.asyncio
+    async def test_unknown_version_falls_back_to_latest(self) -> None:
+        fetcher = FakeGitHubIssueFetcher()
+        fetcher.set_payload(
+            title="issue with bogus version",
+            body="### Steps to reproduce\n1. open cline\n2. press ctrl+c\n",
+            state=IssueState.OPEN,
+        )
+        provider = CrashSimProvider()
+        reviewer = IssueReviewer(provider=provider, fetcher=fetcher)
+        result = await reviewer.review(REAL_ISSUE_URL)
+        assert result.success is True
+        assert result.crash_observed is True
+
+    @pytest.mark.asyncio
     async def test_write_report(self, tmp_path: Path) -> None:
         fetcher = FakeGitHubIssueFetcher()
         fetcher.set_payload(title="test", body="body", state=IssueState.OPEN)
@@ -163,3 +177,22 @@ class TestReviewRealIssueCrashSim:
         assert written.exists()
         content = written.read_text()
         assert REAL_ISSUE_URL in content
+
+    @pytest.mark.asyncio
+    async def test_concurrent_reviews_use_correct_binary(self) -> None:
+        from community_manager.sandbox.docker_provider import DockerProvider
+
+        podman = DockerProvider(config=SandboxConfig(), binary="podman")
+        fetcher = FakeGitHubIssueFetcher()
+        for _ in range(3):
+            fetcher.set_payload(
+                title="test",
+                body="### Steps to reproduce\n1. open cline\n2. press ctrl+c\n",
+                state=IssueState.OPEN,
+            )
+        reviewer = IssueReviewer(provider=podman, fetcher=fetcher)
+        results = await reviewer.review_many(
+            [REAL_ISSUE_URL] * 3, max_concurrent=2,
+        )
+        assert len(results) == 3
+        assert all(r.success for r in results)

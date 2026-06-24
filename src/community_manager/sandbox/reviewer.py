@@ -143,6 +143,13 @@ class IssueReviewer:
             sandbox_id,
             ["npm", "install", "-g", package],
         )
+        if result.exit_code != 0 and "ETARGET" in result.stderr and cline_version:
+            self._log(f"Version {cline_version} not found, falling back to latest")
+            package = "cline"
+            result = await self.provider.exec(
+                sandbox_id,
+                ["npm", "install", "-g", package],
+            )
         if result.exit_code != 0:
             raise RuntimeError(f"npm install -g {package} failed: {result.stderr}")
         self._log(f"{package} installed")
@@ -171,7 +178,7 @@ class IssueReviewer:
                 if process_exited_with_crash(result):
                     any_crash = True
                     record["crashed"] = True
-                    self._log(f"  <<< CRASH DETECTED >>>")
+                    self._log("  <<< CRASH DETECTED >>>")
                     core_dump = await self.provider.exec(
                         sandbox_id,
                         ["sh", "-c", "coredumpctl list 2>/dev/null || echo none"],
