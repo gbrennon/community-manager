@@ -114,7 +114,10 @@ class IssueReviewer:
         async def review_one(url: str) -> ReviewResult:
             async with semaphore:
                 provider_cls = type(self.provider)
-                fresh_provider = provider_cls(config=self.config)
+                if isinstance(self.provider, DockerProvider):
+                    fresh_provider = provider_cls(config=self.config, binary=self.provider.binary)
+                else:
+                    fresh_provider = provider_cls(config=self.config)
                 reviewer = IssueReviewer(
                     provider=fresh_provider, config=self.config, fetcher=self.fetcher,
                     debug=self.debug,

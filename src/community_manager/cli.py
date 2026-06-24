@@ -9,6 +9,7 @@ from typing import Sequence
 
 from community_manager.fetcher import GitHubIssueFetcher
 from community_manager.sandbox.reviewer import IssueReviewer
+from community_manager.sandbox.reviewer import ReviewResult
 
 _CONTAINER_RUNTIMES = ("podman", "docker")
 _QEMU_BINARY = "qemu-system-x86_64"
@@ -42,9 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     review_cmd = sub.add_parser(
-        "review", help="Autonomously review a GitHub issue inside a sandbox",
+        "review", help="Review one or more issues by URL or ID",
     )
-    review_cmd.add_argument("url", help="GitHub issue URL")
+    review_cmd.add_argument(
+        "targets", nargs="+",
+        help="Full URLs like https://github.com/user/repo/issues/1 or bare numbers 1 2 3",
+    )
+    review_cmd.add_argument(
+        "--repo", default=None,
+        help="GitHub owner/repo when using bare issue numbers, e.g. cline/cline",
+    )
     review_cmd.add_argument(
         "--debug", action="store_true",
         help="Print every action as it happens",
@@ -58,11 +66,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Container runtime (default: auto-detect)",
     )
     review_cmd.add_argument(
-        "--out", default="findings.md", help="Report output path",
+        "--out", default="verdicts.md", help="Single report or summary file for multiple targets",
+    )
+    review_cmd.add_argument(
+        "--concurrent", type=int, default=4,
+        help="Max parallel reviews (default: 4)",
     )
 
     batch_cmd = sub.add_parser(
-        "batch", help="Review a range of issues from a GitHub repo",
+        "batch", help="Review a consecutive range of issues",
     )
     batch_cmd.add_argument(
         "repo", help="GitHub owner/repo, e.g. cline/cline",
@@ -90,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max concurrent reviews (default: 4)",
     )
     batch_cmd.add_argument(
-        "--out-dir", default="reports", help="Directory for per-issue reports",
+        "--out", default="verdicts.md", help="Summary report file",
     )
 
     return parser
@@ -108,25 +120,27 @@ def run(
         argv = ["fetch"] + list(argv)
 
     args = parser.parse_args(argv)
-    if args.command == "fetch" or (args.command is None and hasattr(args, "url")):
+    if args.command == "fetch" or (args.command is None and hasattr(args, "targets")):
         _run_fetch(args.url, fetcher=fetcher)
     elif args.command == "review":
         _run_review(
-            args.url,
+            args.targets,
+            repo=args.repo,
             debug=getattr(args, "debug", False),
             provider=args.provider,
             container_runtime=args.container_runtime,
             out=args.out,
+            concurrent=args.concurrent,
             fetcher=fetcher,
         )
     elif args.command == "batch":
-        _run_batch(
+        _run_batch_range(
             args.repo, args.start, args.end,
             debug=getattr(args, "debug", False),
             provider=args.provider,
             container_runtime=args.container_runtime,
             concurrent=args.concurrent,
-            out_dir=args.out_dir,
+            out=args.out,
             fetcher=fetcher,
         )
     else:
@@ -147,45 +161,56 @@ def _run_fetch(url: str, *, fetcher: GitHubIssueFetcher | None = None) -> None:
     print(issue.body or "(empty body)")
 
 
+def _resolve_targets_to_urls(targets: list[str], repo: str | None) -> list[str]:
+    """Convert target list (URLs or bare IDs) into full GitHub URLs."""
+    result: list[str] = []
+    for t in targets:
+        if t.startswith("https://"):
+            result.append(t)
+        elif repo:
+            result.append(f"https://github.com/{repo}/issues/{t}")
+        else:
+            print(
+                f"Error: '{t}' is not a full URL and --repo was not set.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    return result
+
+
 def _run_review(
-    url: str,
+    targets: list[str],
     *,
+    repo: str | None = None,
     debug: bool = False,
     provider: str = "auto",
     container_runtime: str = "auto",
-    out: str = "findings.md",
+    out: str = "verdicts.md",
+    concurrent: int = 4,
     fetcher: GitHubIssueFetcher | None = None,
 ) -> None:
-    from community_manager.sandbox.protocol import SandboxConfig
-    from community_manager.sandbox.docker_provider import DockerProvider
+    urls = _resolve_targets_to_urls(targets, repo)
+    fetcher = fetcher or GitHubIssueFetcher()
 
-    config = SandboxConfig()
     provider = _resolve_provider(provider)
     container_runtime = _resolve_container_runtime(container_runtime)
-
-    if provider == "qemu":
-        sandbox, backend_label = _build_qemu_provider(config)
-    else:
-        sandbox, backend_label = _build_container_provider(config, container_runtime)
-
-    if debug:
-        print(f"[debug] provider={provider} runtime={container_runtime}")
+    sandbox, backend_label = _build_sandbox(provider, container_runtime)
 
     reviewer = IssueReviewer(
-        provider=sandbox, fetcher=fetcher or GitHubIssueFetcher(), debug=debug,
+        provider=sandbox, fetcher=fetcher, debug=debug,
     )
 
-    async def review_and_print() -> None:
-        print(f"Reviewing {url} ...")
-        print(f"Sandbox: {backend_label}")
-        verdict = await reviewer.review(url)
-        _print_verdict(verdict)
-        reviewer.write_report(verdict, Path(out))
+    async def run_all() -> None:
+        print(f"Reviewing {len(urls)} issue(s) ...")
+        print(f"Sandbox: {backend_label} | concurrent: {concurrent}")
+        results = await reviewer.review_many(urls, max_concurrent=concurrent)
+        _write_verdicts_file(results, Path(out))
+        _print_summary(results)
 
-    asyncio.run(review_and_print())
+    asyncio.run(run_all())
 
 
-def _run_batch(
+def _run_batch_range(
     repo: str,
     start: int,
     end: int,
@@ -194,49 +219,37 @@ def _run_batch(
     provider: str = "auto",
     container_runtime: str = "auto",
     concurrent: int = 4,
-    out_dir: str = "reports",
+    out: str = "verdicts.md",
     fetcher: GitHubIssueFetcher | None = None,
 ) -> None:
-    from community_manager.sandbox.protocol import SandboxConfig
-    from community_manager.sandbox.docker_provider import DockerProvider
-
+    urls = [f"https://github.com/{repo}/issues/{n}" for n in range(start, end + 1)]
     fetcher = fetcher or GitHubIssueFetcher()
-    config = SandboxConfig()
+
     provider = _resolve_provider(provider)
     container_runtime = _resolve_container_runtime(container_runtime)
-    reports_dir = Path(out_dir)
-    reports_dir.mkdir(parents=True, exist_ok=True)
-
-    if provider == "qemu":
-        sandbox, backend_label = _build_qemu_provider(config)
-    else:
-        sandbox, backend_label = _build_container_provider(config, container_runtime)
-
-    urls = [f"https://github.com/{repo}/issues/{n}" for n in range(start, end + 1)]
-
-    if debug:
-        print(f"[debug] repo={repo} range={start}-{end} provider={provider} runtime={container_runtime} concurrent={concurrent}")
+    sandbox, backend_label = _build_sandbox(provider, container_runtime)
 
     reviewer = IssueReviewer(
         provider=sandbox, fetcher=fetcher, debug=debug,
     )
 
-    async def run_batch() -> None:
+    async def run_all() -> None:
         print(f"Batch reviewing {len(urls)} issues ({repo} #{start}–#{end}) ...")
         print(f"Sandbox: {backend_label} | concurrent: {concurrent}")
         results = await reviewer.review_many(urls, max_concurrent=concurrent)
+        _write_verdicts_file(results, Path(out))
+        _print_summary(results)
 
-        for r in results:
-            issue_num = r.issue_url.rstrip("/").rsplit("/", 1)[1]
-            report_path = reports_dir / f"{issue_num}.md"
-            reviewer.write_report(r, report_path)
-            status = "CONFIRMED" if r.crash_observed else ("ok" if r.reproduced else "FAIL")
-            print(f"  #{issue_num}  {r.issue_title[:60]:60s}  {status}")
+    asyncio.run(run_all())
 
-        crashes = sum(1 for r in results if r.crash_observed)
-        print(f"\nDone. {len(results)} reviews, {crashes} crashes confirmed. Reports in {reports_dir}/")
 
-    asyncio.run(run_batch())
+def _build_sandbox(provider: str, container_runtime: str) -> tuple[object, str]:
+    from community_manager.sandbox.protocol import SandboxConfig
+
+    config = SandboxConfig()
+    if provider == "qemu":
+        return _build_qemu_provider(config)
+    return _build_container_provider(config, container_runtime)
 
 
 def _resolve_provider(raw: str) -> str:
@@ -258,7 +271,7 @@ def _resolve_container_runtime(raw: str) -> str:
     return _first_available_container_runtime() if raw == "auto" else raw
 
 
-def _build_qemu_provider(config: SandboxConfig) -> tuple[object, str]:
+def _build_qemu_provider(config: object) -> tuple[object, str]:
     if not _qemu_is_installed():
         print("Error: qemu-system-x86_64 not found on PATH", file=sys.stderr)
         sys.exit(1)
@@ -271,7 +284,7 @@ def _build_qemu_provider(config: SandboxConfig) -> tuple[object, str]:
     return qemu, "qemu"
 
 
-def _build_container_provider(config: SandboxConfig, runtime: str) -> tuple[object, str]:
+def _build_container_provider(config: object, runtime: str) -> tuple[object, str]:
     if not shutil.which(runtime):
         print(
             f"Error: {runtime} not found on PATH. Install podman or docker.",
@@ -283,18 +296,43 @@ def _build_container_provider(config: SandboxConfig, runtime: str) -> tuple[obje
     return DockerProvider(config=config, binary=runtime), runtime
 
 
-def _print_verdict(result: object) -> None:
+def _write_verdicts_file(results: list[ReviewResult], path: Path) -> None:
+    lines: list[str] = []
+    lines.append("# Autonomous Review Verdicts")
+    lines.append("")
+    lines.append(f"| # | Title | Reproduced | Crash | Verdict |")
+    lines.append(f"|---|-------|------------|-------|---------|")
+    for r in results:
+        num = r.issue_url.rstrip("/").rsplit("/", 1)[1]
+        title_short = r.issue_title[:50]
+        reproduced = "✅" if r.reproduced else "❌"
+        crash = "💥 YES" if r.crash_observed else "no"
+        verdict_short = "CONFIRMED" if r.crash_observed else ("OK" if r.reproduced else "FAIL")
+        lines.append(f"| {num} | {title_short} | {reproduced} | {crash} | {verdict_short} |")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    for r in results:
+        num = r.issue_url.rstrip("/").rsplit("/", 1)[1]
+        lines.append(f"## #{num} — {r.issue_title}")
+        lines.append(f"**Verdict:** {r.verdict}")
+        if r.errors:
+            lines.append("**Errors:**")
+            for e in r.errors:
+                lines.append(f"- {e}")
+        lines.append("")
+
+    path.write_text("\n".join(lines))
+
+
+def _print_summary(results: list[ReviewResult]) -> None:
     print()
+    crashes = sum(1 for r in results if r.crash_observed)
+    failures = sum(1 for r in results if not r.success)
     print("=" * 60)
-    print(f"Title:       {result.issue_title}")
-    print(f"Sandbox:     {result.sandbox_id}")
-    print(f"Reproduced:  {result.reproduced}")
-    print(f"Crash:       {result.crash_observed}")
+    print(f"Total:     {len(results)}")
+    print(f"Crashes:   {crashes} {'💥' if crashes else ''}")
+    print(f"Failures:  {failures}")
+    print(f"Verdicts:  {Path('verdicts.md').resolve()}")
     print()
-    print("VERDICT:")
-    print(result.verdict)
-    print()
-    if result.errors:
-        print("Errors:")
-        for error in result.errors:
-            print(f"  - {error}")
