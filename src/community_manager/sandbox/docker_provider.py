@@ -95,6 +95,11 @@ class DockerProvider(SandboxProvider):
 
     async def _create_cline_user(self, sandbox_id: str) -> None:
         await self.exec(sandbox_id, ["useradd", "--create-home", "cline"])
+        await self.exec(
+            sandbox_id,
+            ["sh", "-c",
+             "mkdir -p /home/cline/.npm-global/bin && chown -R cline:cline /home/cline/.npm-global"],
+        )
 
     async def _ensure_healthy(self, sandbox_id: str, timeout: float) -> None:
         deadline = asyncio.get_running_loop().time() + timeout

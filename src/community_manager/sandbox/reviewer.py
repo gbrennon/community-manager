@@ -179,17 +179,17 @@ def parse_steps_from_issue_body(body: str) -> list[str]:
 def convert_step_to_cline_command(step: str) -> list[str]:
     lowered = step.lower()
     if "version" in lowered:
-        return ["su", "cline", "-c", "cline --version"]
+        return ["su", "cline", "-c", "export PATH=/home/cline/.npm-global/bin:$PATH; cline --version"]
     if "open" in lowered and "cline" in lowered:
-        return ["su", "cline", "-c", "timeout 5 cline"]
+        return ["su", "cline", "-c", "export PATH=/home/cline/.npm-global/bin:$PATH; timeout 5 cline"]
     if any(signal in lowered for signal in ("ctrl+c", "sigint", "sigkill")):
         return [
             "su", "cline", "-c",
             "cline & P=$!; sleep 2; kill -2 $P; wait $P 2>/dev/null; echo EXIT:$?",
         ]
     if "exit" in lowered:
-        return ["su", "cline", "-c", "echo exit | timeout 3 cline || true"]
-    return ["su", "cline", "-c", "timeout 10 cline"]
+        return ["su", "cline", "-c", "export PATH=/home/cline/.npm-global/bin:$PATH; echo exit | timeout 3 cline || true"]
+    return ["su", "cline", "-c", "export PATH=/home/cline/.npm-global/bin:$PATH; timeout 10 cline"]
 
 
 def process_exited_with_crash(result: Any) -> bool:
