@@ -112,16 +112,6 @@ uv run ruff check .      # lint (if ruff is installed)
 uv run ruff format .     # format (if ruff is installed)
 ```
 
-Conventional commits (one commit per file):
-
-```
-feat(sandbox): add SandboxProvider protocol
-feat(sandbox): add DockerProvider implementation
-feat(sandbox): add QemuProvider implementation
-feat(sandbox): add IssueReviewer orchestrator with verdicts
-test(sandbox): add 15 tests for IssueReviewer + crash simulation
-```
-
 See **[docs/contributing.md](docs/contributing.md)** for details.
 
 ---

@@ -14,23 +14,29 @@ from community_manager.sandbox.protocol import (
 
 
 class DockerProvider(SandboxProvider):
-    """Launch and manage network‑isolated Docker containers.
+    """Launch and manage network‑isolated Docker / Podman containers.
 
     Uses the ``node:22-slim`` image with TypeScript tooling pre‑installed
     so that ``cline`` can run inside.
+
+    Set ``binary`` to ``"podman"`` for rootless Podman support.
     """
 
     docker_image: str = "cline-review-sandbox"
+    binary: str = "docker"
 
-    def __init__(self, config: SandboxConfig | None = None) -> None:
+    def __init__(
+        self, config: SandboxConfig | None = None, *, binary: str = "docker",
+    ) -> None:
         self.config = config or SandboxConfig()
+        self.binary = binary
 
     async def launch(self) -> str:
         sandbox_id = f"cline-issue-{uuid.uuid4().hex[:12]}"
         network = [] if self.config.network_enabled else ["--network", "none"]
 
         proc = await asyncio.create_subprocess_exec(
-            "docker", "run", "--detach", "--rm",
+            self.binary, "run", "--detach", "--rm",
             *network,
             "--memory", self.config.memory,
             "--cpus", str(self.config.cpus),
@@ -42,22 +48,22 @@ class DockerProvider(SandboxProvider):
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
-            raise RuntimeError(f"Docker launch failed: {stderr.decode().strip()}")
+            raise RuntimeError(f"{self.binary} launch failed: {stderr.decode().strip()}")
 
         await self._wait_healthy(sandbox_id)
         return sandbox_id
 
     async def copy_in(self, sandbox_id: str, host_path: Path, sandbox_path: Path) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "cp", str(host_path), f"{sandbox_id}:{sandbox_path}",
+            self.binary, "cp", str(host_path), f"{sandbox_id}:{sandbox_path}",
         )
         await proc.wait()
         if proc.returncode != 0:
-            raise RuntimeError(f"docker cp failed for {sandbox_id}")
+            raise RuntimeError(f"{self.binary} cp failed for {sandbox_id}")
 
     async def exec(self, sandbox_id: str, command: list[str]) -> SandboxResult:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", "--workdir", str(self.config.workspace_dir),
+            self.binary, "exec", "--workdir", str(self.config.workspace_dir),
             sandbox_id, *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -71,20 +77,23 @@ class DockerProvider(SandboxProvider):
 
     async def destroy(self, sandbox_id: str) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "stop", sandbox_id,
+            self.binary, "stop", sandbox_id,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
         await proc.wait()
 
     async def is_healthy(self, sandbox_id: str) -> bool:
+        # Podman: --format uses .State.Status (not .State.Running alias)
+        fmt = "{{.State.Status}}" if self.binary == "podman" else "{{.State.Running}}"
         proc = await asyncio.create_subprocess_exec(
-            "docker", "inspect", "--format", "{{.State.Running}}", sandbox_id,
+            self.binary, "inspect", "--format", fmt, sandbox_id,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await proc.communicate()
-        return stdout.decode().strip() == "true"
+        val = stdout.decode().strip()
+        return val in ("true", "running")
 
     async def _wait_healthy(self, sandbox_id: str, timeout: float = 30.0) -> None:
         loop = asyncio.get_running_loop()
