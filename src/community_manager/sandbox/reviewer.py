@@ -31,8 +31,6 @@ VERDICT_NO_CRASH = "Issue reproduced but no crash observed in this environment."
 
 @dataclass
 class ReviewResult:
-    """Structured report produced after an autonomous review."""
-
     issue_url: str
     issue_title: str
     sandbox_id: str
@@ -46,7 +44,7 @@ class ReviewResult:
 
 
 class IssueReviewer:
-    """Fetch an issue, launch a sandbox, reproduce steps, capture results."""
+    """Fetch an issue, launch a sandbox, install cline, reproduce steps, capture results."""
 
     def __init__(
         self,
@@ -73,9 +71,8 @@ class IssueReviewer:
             sandbox_id=sandbox_id, success=False,
         )
         try:
-            host_project = project_dir or Path.cwd()
-            await self.provider.copy_in(sandbox_id, host_project, self.config.workspace_dir)
-            await self._require_cline(sandbox_id)
+            await self._install_cline(sandbox_id, issue.cline_version)
+            await self.provider.disconnect_network(sandbox_id)
 
             reproduced, crash_detected, step_log = await self._execute_steps(
                 sandbox_id, reproduction_steps,
@@ -91,7 +88,6 @@ class IssueReviewer:
         finally:
             await self.provider.destroy(sandbox_id)
         return result
-
     async def review_many(
         self, urls: list[str], *, project_dir: Path | None = None,
         max_concurrent: int = 4,
@@ -119,10 +115,15 @@ class IssueReviewer:
                 errors=[f"Failed to fetch issue: {exc}"],
             )
 
-    async def _require_cline(self, sandbox_id: str) -> None:
-        result = await self.provider.exec(sandbox_id, ["cline", "--version"])
+    async def _install_cline(self, sandbox_id: str, cline_version: str) -> None:
+        package = f"cline@{cline_version}" if cline_version else "cline"
+        escaped = package.replace("'", "'\\''")
+        result = await self.provider.exec(
+            sandbox_id,
+            ["su", "cline", "-c", f"npm install -g '{escaped}'"],
+        )
         if result.exit_code != 0:
-            raise RuntimeError(f"cline not available in sandbox: {result.stderr}")
+            raise RuntimeError(f"npm install -g {package} failed: {result.stderr}")
 
     async def _execute_steps(
         self, sandbox_id: str, steps: list[str],
@@ -178,18 +179,17 @@ def parse_steps_from_issue_body(body: str) -> list[str]:
 def convert_step_to_cline_command(step: str) -> list[str]:
     lowered = step.lower()
     if "version" in lowered:
-        return ["cline", "--version"]
+        return ["su", "cline", "-c", "cline --version"]
     if "open" in lowered and "cline" in lowered:
-        return ["timeout", "5", "cline"]
+        return ["su", "cline", "-c", "timeout 5 cline"]
     if any(signal in lowered for signal in ("ctrl+c", "sigint", "sigkill")):
         return [
-            "bash", "-c",
-            "cline & CLINE_PID=$!; sleep 2; kill -2 $CLINE_PID; "
-            "wait $CLINE_PID 2>/dev/null; echo EXIT:$?",
+            "su", "cline", "-c",
+            "cline & P=$!; sleep 2; kill -2 $P; wait $P 2>/dev/null; echo EXIT:$?",
         ]
     if "exit" in lowered:
-        return ["bash", "-c", "echo exit | timeout 3 cline || true"]
-    return ["timeout", "10", "cline"]
+        return ["su", "cline", "-c", "echo exit | timeout 3 cline || true"]
+    return ["su", "cline", "-c", "timeout 10 cline"]
 
 
 def process_exited_with_crash(result: Any) -> bool:

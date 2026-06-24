@@ -13,7 +13,7 @@ class SandboxConfig:
 
     memory: str = "1g"
     cpus: int = 2
-    network_enabled: bool = False
+    network_enabled: bool = True    # start with network so npm install works
     workspace_dir: Path = field(default_factory=lambda: Path("/home/cline/project"))
 
 
@@ -50,3 +50,7 @@ class SandboxProvider(ABC):
     @abstractmethod
     async def is_healthy(self, sandbox_id: str) -> bool:
         """Check whether the sandbox is still alive."""
+
+    @abstractmethod
+    async def disconnect_network(self, sandbox_id: str) -> None:
+        """Sever all network access after install phase is complete."""

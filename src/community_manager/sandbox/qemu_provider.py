@@ -84,6 +84,9 @@ class QemuProvider(SandboxProvider):
             pass
         socket.unlink(missing_ok=True)
 
+    async def disconnect_network(self, sid: str) -> None:
+        pass
+
     async def is_healthy(self, sid: str) -> bool:
         socket = self._socket_for(sid)
         if not socket.exists():

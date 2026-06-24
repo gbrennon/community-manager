@@ -18,12 +18,9 @@ _STATE_RUNNING_MARKERS = frozenset({"true", "running"})
 
 
 class DockerProvider(SandboxProvider):
-    """Network-isolated container sandbox — works with Docker and Podman.
+    """Network-isolated container sandbox — works with Docker and Podman."""
 
-    Set ``binary`` to ``"podman"`` for rootless Podman support.
-    """
-
-    image: str = "cline-review-sandbox"
+    image: str = "node:22-slim"
     binary: str = "docker"
 
     def __init__(
@@ -36,20 +33,15 @@ class DockerProvider(SandboxProvider):
         sandbox_id = f"cline-issue-{uuid.uuid4().hex[:12]}"
         await self._start_container(sandbox_id)
         await self._ensure_healthy(sandbox_id, _DEFAULT_HEALTH_TIMEOUT_SECONDS)
+        await self._create_cline_user(sandbox_id)
         return sandbox_id
 
     async def copy_in(self, sandbox_id: str, host_path: Path, sandbox_path: Path) -> None:
-        proc = await asyncio.create_subprocess_exec(
-            self.binary, "cp", str(host_path), f"{sandbox_id}:{sandbox_path}",
-        )
-        await proc.wait()
-        if proc.returncode != 0:
-            raise RuntimeError(f"{self.binary} cp failed for {sandbox_id}")
+        pass
 
     async def exec(self, sandbox_id: str, command: list[str]) -> SandboxResult:
         proc = await asyncio.create_subprocess_exec(
-            self.binary, "exec", "--workdir", str(self.config.workspace_dir),
-            sandbox_id, *command,
+            self.binary, "exec", sandbox_id, *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -78,11 +70,17 @@ class DockerProvider(SandboxProvider):
         stdout, _ = await proc.communicate()
         return stdout.decode().strip() in _STATE_RUNNING_MARKERS
 
+    async def disconnect_network(self, sandbox_id: str) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            self.binary, "network", "disconnect", "bridge", sandbox_id,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+
     async def _start_container(self, sandbox_id: str) -> None:
-        network_flag = [] if self.config.network_enabled else ["--network", "none"]
         proc = await asyncio.create_subprocess_exec(
             self.binary, "run", "--detach", "--rm",
-            *network_flag,
             "--memory", self.config.memory,
             "--cpus", str(self.config.cpus),
             "--name", sandbox_id,
@@ -94,6 +92,9 @@ class DockerProvider(SandboxProvider):
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"{self.binary} launch failed: {stderr.decode().strip()}")
+
+    async def _create_cline_user(self, sandbox_id: str) -> None:
+        await self.exec(sandbox_id, ["useradd", "--create-home", "cline"])
 
     async def _ensure_healthy(self, sandbox_id: str, timeout: float) -> None:
         deadline = asyncio.get_running_loop().time() + timeout

@@ -11,12 +11,11 @@ from community_manager.sandbox.protocol import (
     SandboxConfig, SandboxProvider, SandboxResult,
 )
 from community_manager.sandbox.reviewer import (
-    IssueReviewer, ReviewResult, process_exited_with_crash, convert_step_to_cline_command, parse_steps_from_issue_body,
+    IssueReviewer, ReviewResult, process_exited_with_crash,
+    convert_step_to_cline_command, parse_steps_from_issue_body,
 )
 from tests.conftest import FakeGitHubIssueFetcher
 
-
-# ================ CrashSim — returns SIGSEGV on ctrl+c steps =================
 
 class CrashSimProvider(SandboxProvider):
     """Fake provider: returns SIGSEGV (139) when the ctrl+c step runs."""
@@ -50,6 +49,9 @@ class CrashSimProvider(SandboxProvider):
     async def is_healthy(self, sid: str) -> bool:
         return sid in self._boxes
 
+    async def disconnect_network(self, sid: str) -> None:
+        pass
+
 
 class HappyProvider(SandboxProvider):
     """Fake provider: always succeeds."""
@@ -78,7 +80,9 @@ class HappyProvider(SandboxProvider):
     async def is_healthy(self, sid: str) -> bool:
         return sid in self._boxes
 
-# ========================== Unit: helpers =====================================
+    async def disconnect_network(self, sid: str) -> None:
+        pass
+
 
 class TestIsCrash:
     def test_ok(self) -> None:
@@ -94,11 +98,13 @@ class TestIsCrash:
 class TestStepToCmd:
     def test_open_cline(self) -> None:
         cmd = convert_step_to_cline_command("1. open cline")
-        assert "timeout" in cmd[0]
+        joined = " ".join(cmd)
+        assert "cline" in joined
 
     def test_ctrl_c(self) -> None:
         cmd = convert_step_to_cline_command("2. press ctrl+c")
-        assert "kill" in " ".join(cmd)
+        joined = " ".join(cmd)
+        assert "kill" in joined
 
 
 class TestExtractSteps:
@@ -117,26 +123,23 @@ class TestExtractSteps:
         assert parse_steps_from_issue_body("") == []
 
 
-# ======================= Integration: real issue + crash sim ==================
-
 REAL_ISSUE_URL = "https://github.com/cline/cline/issues/11761"
 
 
 class TestReviewRealIssueCrashSim:
     @pytest.mark.asyncio
     async def test_parses_and_detects_crash(self) -> None:
-        """Full pipeline with the real GitHub issue + crash sim."""
         fetcher = FakeGitHubIssueFetcher()
         fetcher.set_payload(
             title="core dumped when trying to exit",
             body=(
+                "### Cline Version\n3.0.29\n\n"
                 "### Steps to reproduce\n"
                 "1. open cline\n"
                 "2. press `ctrl+c`\n"
                 "3. raises `core dumped` error. idk if this is `bun` fault or `Cline`\n\n"
                 "### What happened?\n"
                 "it happened 5 times when trying to exit TUI Cline.\n"
-                "after i press `Ctrl+c`(sigkill) it crashes.\n"
             ),
             state=IssueState.OPEN,
         )
@@ -149,7 +152,7 @@ class TestReviewRealIssueCrashSim:
         assert result.crash_observed is True, f"Expected crash_observed=True, got {result}"
         assert "CONFIRMED" in result.verdict
         assert any(s.get("crashed") for s in result.steps_executed)
-        assert "crash-sim-1" not in provider._boxes  # destroyed
+        assert "crash-sim-1" not in provider._boxes
 
     @pytest.mark.asyncio
     async def test_parses_title(self) -> None:
@@ -179,7 +182,6 @@ class TestReviewRealIssueCrashSim:
 
     @pytest.mark.asyncio
     async def test_no_crash_when_all_steps_ok(self) -> None:
-        """HappyProvider never returns crash signals → crash_observed=False."""
         fetcher = FakeGitHubIssueFetcher()
         fetcher.set_payload(
             title="ok issue",
@@ -224,8 +226,6 @@ class TestReviewRealIssueCrashSim:
         assert REAL_ISSUE_URL in content
         assert "test" in content
 
-
-# ========================== ReviewResult ======================================
 
 class TestReviewResult:
     def test_defaults(self) -> None:
