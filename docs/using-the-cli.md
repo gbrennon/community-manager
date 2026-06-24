@@ -1,7 +1,6 @@
 # Using the CLI
 
-`communiy-manager` ships with a CLI that fetches public GitHub issues and
-displays them.
+`communiy-manager` ships with two subcommands: `fetch` and `review`.
 
 ---
 
@@ -23,6 +22,8 @@ uv sync
 ## Fetch an issue
 
 ```bash
+uv run communiy-manager fetch https://github.com/cline/cline/issues/11761
+# or the short form (bare URL):
 uv run communiy-manager https://github.com/cline/cline/issues/11761
 ```
 
@@ -39,19 +40,57 @@ CLI
 
 ---
 
+## Review an issue autonomously
+
+```bash
+uv run communiy-manager review https://github.com/cline/cline/issues/11761
+```
+
+This drives the **full autonomous pipeline**:
+
+1. Fetches the issue from GitHub
+2. Parses "Steps to reproduce" from the body
+3. Launches an isolated Docker container (`--network none`)
+4. Runs `cline` inside following each step
+5. Detects crashes (SIGSEGV, SIGABRT, core dumps)
+6. Destroys the sandbox (always, even on errors)
+7. Prints a verdict and writes `findings.md`
+
+```
+Reviewing https://github.com/cline/cline/issues/11761 ...
+
+============================================================
+Title:       core dumped when trying to exit
+Sandbox:     cline-issue-a1b2c3d4e5f6
+Reproduced:  True
+Crash:       True
+
+VERDICT:
+**CONFIRMED**: Crash reproduced inside the sandbox. Cline exits
+with core dump after SIGINT/Ctrl+C. Likely a bun-level or
+Cline signal-handling bug.
+
+Report written to findings.md
+```
+
+### Options
+
+```bash
+# Use QEMU instead of Docker
+uv run communiy-manager review --provider qemu https://github.com/cline/cline/issues/11761
+
+# Custom report path
+uv run communiy-manager review --out /tmp/report.md https://github.com/cline/cline/issues/11761
+```
+
+---
+
 ## Help
 
 ```bash
 uv run communiy-manager --help
-```
-
-```
-usage: communiy-manager [-h] url
-
-Fetch public GitHub issues and display them.
-
-positional arguments:
-  url         GitHub issue URL, e.g. https://github.com/cline/cline/issues/11761
+uv run communiy-manager fetch --help
+uv run communiy-manager review --help
 ```
 
 ---
@@ -62,13 +101,13 @@ If the URL is invalid or the API request fails, the CLI prints the error to
 stderr and exits with code 1:
 
 ```bash
-$ uv run communiy-manager https://github.com/nonexistent/repo/issues/1
+$ uv run communiy-manager fetch https://github.com/nonexistent/repo/issues/1
 Error: HTTP Error 404: Not Found
 ```
 
 ---
 
-## API
+## Programmatic API
 
 The `run()` function accepts an optional `fetcher` argument for dependency
 injection (used in tests):
@@ -77,5 +116,22 @@ injection (used in tests):
 from community_manager.cli import run
 from community_manager.fetcher import GitHubIssueFetcher
 
-run(["https://github.com/owner/repo/issues/1"], fetcher=GitHubIssueFetcher())
+run(["fetch", "https://github.com/owner/repo/issues/1"],
+    fetcher=GitHubIssueFetcher())
+```
+
+For the full sandbox review API, import directly:
+
+```python
+import asyncio
+from community_manager.sandbox.reviewer import IssueReviewer
+
+async def main():
+    reviewer = IssueReviewer()
+    result = await reviewer.review(
+        "https://github.com/cline/cline/issues/11761"
+    )
+    print(result.verdict)
+
+asyncio.run(main())
 ```

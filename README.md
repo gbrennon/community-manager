@@ -26,8 +26,11 @@ uv run pytest       # 45 tests, 74 % coverage
 ## CLI
 
 ```bash
-# Fetch & display a GitHub issue
-uv run communiy-manager https://github.com/cline/cline/issues/11761
+# Fetch & display a GitHub issue (also works as bare URL)
+uv run communiy-manager fetch https://github.com/cline/cline/issues/11761
+
+# Autonomously review — fetch, sandbox, reproduce, verdict
+uv run communiy-manager review https://github.com/cline/cline/issues/11761
 ```
 
 For the full CLI reference see **[docs/using-the-cli.md](docs/using-the-cli.md)**.
