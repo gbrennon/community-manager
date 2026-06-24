@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated reports
+findings.md
+
+# Coverage
+htmlcov/
+.coverage
