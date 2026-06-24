@@ -18,7 +18,7 @@ _STATE_RUNNING_MARKERS = frozenset({"true", "running"})
 
 
 class DockerProvider(SandboxProvider):
-    """Network-isolated container sandbox — works with Docker and Podman."""
+    """Ephemeral container sandbox — Docker or Podman."""
 
     image: str = "node:22-slim"
     binary: str = "docker"
@@ -33,7 +33,6 @@ class DockerProvider(SandboxProvider):
         sandbox_id = f"cline-issue-{uuid.uuid4().hex[:12]}"
         await self._start_container(sandbox_id)
         await self._ensure_healthy(sandbox_id, _DEFAULT_HEALTH_TIMEOUT_SECONDS)
-        await self._create_cline_user(sandbox_id)
         return sandbox_id
 
     async def copy_in(self, sandbox_id: str, host_path: Path, sandbox_path: Path) -> None:
@@ -92,14 +91,6 @@ class DockerProvider(SandboxProvider):
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"{self.binary} launch failed: {stderr.decode().strip()}")
-
-    async def _create_cline_user(self, sandbox_id: str) -> None:
-        await self.exec(sandbox_id, ["useradd", "--create-home", "cline"])
-        await self.exec(
-            sandbox_id,
-            ["sh", "-c",
-             "mkdir -p /home/cline/.npm-global/bin && chown -R cline:cline /home/cline/.npm-global"],
-        )
 
     async def _ensure_healthy(self, sandbox_id: str, timeout: float) -> None:
         deadline = asyncio.get_running_loop().time() + timeout

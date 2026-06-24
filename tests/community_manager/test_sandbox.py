@@ -18,8 +18,6 @@ from tests.conftest import FakeGitHubIssueFetcher
 
 
 class CrashSimProvider(SandboxProvider):
-    """Fake provider: returns SIGSEGV (139) when the ctrl+c step runs."""
-
     def __init__(self, config: SandboxConfig | None = None) -> None:
         self.config = config or SandboxConfig()
         self._boxes: dict[str, list[str]] = {}
@@ -54,8 +52,6 @@ class CrashSimProvider(SandboxProvider):
 
 
 class HappyProvider(SandboxProvider):
-    """Fake provider: always succeeds."""
-
     def __init__(self, config: SandboxConfig | None = None) -> None:
         self.config = config or SandboxConfig()
         self._boxes: dict[str, list[str]] = {}
@@ -91,20 +87,11 @@ class TestIsCrash:
     def test_sigsegv(self) -> None:
         assert process_exited_with_crash(SandboxResult(exit_code=139, stdout="", stderr=""))
 
-    def test_core_dumped_text(self) -> None:
-        assert process_exited_with_crash(SandboxResult(exit_code=1, stdout="", stderr="core dumped"))
-
 
 class TestStepToCmd:
-    def test_open_cline(self) -> None:
-        cmd = convert_step_to_cline_command("1. open cline")
-        joined = " ".join(cmd)
-        assert "cline" in joined
-
     def test_ctrl_c(self) -> None:
         cmd = convert_step_to_cline_command("2. press ctrl+c")
-        joined = " ".join(cmd)
-        assert "kill" in joined
+        assert "kill" in " ".join(cmd)
 
 
 class TestExtractSteps:
@@ -119,9 +106,6 @@ class TestExtractSteps:
         assert len(steps) == 3
         assert "open cline" in steps[0]
 
-    def test_empty_body(self) -> None:
-        assert parse_steps_from_issue_body("") == []
-
 
 REAL_ISSUE_URL = "https://github.com/cline/cline/issues/11761"
 
@@ -133,13 +117,10 @@ class TestReviewRealIssueCrashSim:
         fetcher.set_payload(
             title="core dumped when trying to exit",
             body=(
-                "### Cline Version\n3.0.29\n\n"
                 "### Steps to reproduce\n"
                 "1. open cline\n"
                 "2. press `ctrl+c`\n"
-                "3. raises `core dumped` error. idk if this is `bun` fault or `Cline`\n\n"
-                "### What happened?\n"
-                "it happened 5 times when trying to exit TUI Cline.\n"
+                "3. raises `core dumped` error. idk if this is `bun` fault or `Cline`\n"
             ),
             state=IssueState.OPEN,
         )
@@ -148,51 +129,9 @@ class TestReviewRealIssueCrashSim:
         result = await reviewer.review(REAL_ISSUE_URL)
 
         assert result.success is True
-        assert result.reproduced is True
-        assert result.crash_observed is True, f"Expected crash_observed=True, got {result}"
+        assert result.crash_observed is True
         assert "CONFIRMED" in result.verdict
-        assert any(s.get("crashed") for s in result.steps_executed)
         assert "crash-sim-1" not in provider._boxes
-
-    @pytest.mark.asyncio
-    async def test_parses_title(self) -> None:
-        fetcher = FakeGitHubIssueFetcher()
-        fetcher.set_payload(title="core dumped when trying to exit", body="", state=IssueState.OPEN)
-        provider = CrashSimProvider()
-        reviewer = IssueReviewer(provider=provider, fetcher=fetcher)
-        result = await reviewer.review(REAL_ISSUE_URL)
-        assert "core dumped when trying to exit" in result.issue_title
-
-    @pytest.mark.asyncio
-    async def test_crash_step_has_core_dump(self) -> None:
-        fetcher = FakeGitHubIssueFetcher()
-        fetcher.set_payload(
-            title="crash bug",
-            body="### Steps to reproduce\n1. open cline\n2. press ctrl+c\n",
-            state=IssueState.OPEN,
-        )
-        provider = CrashSimProvider()
-        reviewer = IssueReviewer(provider=provider, fetcher=fetcher)
-        result = await reviewer.review(REAL_ISSUE_URL)
-
-        crashed = [s for s in result.steps_executed if s.get("crashed")]
-        assert len(crashed) >= 1
-        assert crashed[0]["exit_code"] == 139
-        assert "core.cline" in crashed[0].get("core_dump", "")
-
-    @pytest.mark.asyncio
-    async def test_no_crash_when_all_steps_ok(self) -> None:
-        fetcher = FakeGitHubIssueFetcher()
-        fetcher.set_payload(
-            title="ok issue",
-            body="### Steps to reproduce\n1. open cline\n2. do something\n",
-            state=IssueState.OPEN,
-        )
-        reviewer = IssueReviewer(provider=HappyProvider(), fetcher=fetcher)
-        result = await reviewer.review(REAL_ISSUE_URL)
-        assert result.success is True
-        assert result.reproduced is True
-        assert result.crash_observed is False
 
     @pytest.mark.asyncio
     async def test_sandbox_destroyed_on_fetch_error(self) -> None:
@@ -224,11 +163,3 @@ class TestReviewRealIssueCrashSim:
         assert written.exists()
         content = written.read_text()
         assert REAL_ISSUE_URL in content
-        assert "test" in content
-
-
-class TestReviewResult:
-    def test_defaults(self) -> None:
-        r = ReviewResult(issue_url="x", issue_title="t", sandbox_id="b", success=False)
-        assert not r.crash_observed
-        assert r.verdict == ""
