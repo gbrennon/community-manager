@@ -1,4 +1,4 @@
-"""QEMU sandbox provider — full kernel-level isolation."""
+"""Sandbox provider backed by QEMU — full kernel-level isolation."""
 
 from __future__ import annotations
 
@@ -11,9 +11,16 @@ from community_manager.sandbox.protocol import (
     SandboxConfig, SandboxProvider, SandboxResult,
 )
 
+_QEMU_BINARY = "qemu-system-x86_64"
+_SOCAT_BINARY = "socat"
+_BOOT_TIMEOUT_SECONDS = 90.0
+_BOOT_POLL_SECONDS = 1.0
+_COMMAND_TIMEOUT_SECONDS = 30.0
+_EXIT_MARKER = "EXIT:"
+
 
 class QemuProvider(SandboxProvider):
-    """Launch QEMU VMs with -net none. Communicates via serial socket."""
+    """Launch QEMU VMs with -net none. Communicates via Unix serial socket."""
 
     disk_image: Path = Path("cline-review.qcow2")
     serial_socket_dir: Path = Path("/tmp")
@@ -23,21 +30,19 @@ class QemuProvider(SandboxProvider):
 
     async def launch(self) -> str:
         sandbox_id = f"cline-issue-{uuid.uuid4().hex[:12]}"
-        sock = self.serial_socket_dir / f"{sandbox_id}.sock"
+        socket = self._socket_for(sandbox_id)
 
         if not self.disk_image.exists():
             raise RuntimeError(f"QEMU disk image not found: {self.disk_image}")
 
-        net = ["-net", "none"] if not self.config.network_enabled else []
         proc = await asyncio.create_subprocess_exec(
-            "qemu-system-x86_64",
-            "-enable-kvm",
+            _QEMU_BINARY, "-enable-kvm",
             "-m", self.config.memory.removesuffix("g") + "G",
             "-smp", str(self.config.cpus),
             "-drive", f"file={self.disk_image},if=virtio",
-            *net,
-            "-serial", f"unix:{sock},server,nowait",
-            "-display", "none",     # headless — replaces -nographic
+            *self._network_flags(),
+            "-serial", f"unix:{socket},server,nowait",
+            "-display", "none",
             "-daemonize",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
@@ -45,81 +50,91 @@ class QemuProvider(SandboxProvider):
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"QEMU launch failed: {stderr.decode().strip()}")
-        await self._wait_healthy(sandbox_id, sock)
+        await self._wait_for_boot(sandbox_id, socket)
         return sandbox_id
 
     async def copy_in(self, sid: str, host: Path, sandbox: Path) -> None:
-        sock = self._socket_for(sid)
-        proc = await asyncio.create_subprocess_exec(
-            "tar", "-czf", "-", "-C", str(host.parent), host.name,
-            stdout=asyncio.subprocess.PIPE,
+        socket = self._socket_for(sid)
+        data = await self._tar_directory(host)
+        await self._send_via_socket(
+            socket,
+            f"echo '{base64.b64encode(data).decode()}' | base64 -d | tar -xzf - -C {sandbox.parent}",
         )
-        data, _ = await proc.communicate()
-        b64 = base64.b64encode(data).decode()
-        await self._socket_cmd(sock, f"echo '{b64}' | base64 -d | tar -xzf - -C {sandbox.parent}")
 
-    async def exec(self, sid: str, cmd: list[str]) -> SandboxResult:
-        sock = self._socket_for(sid)
-        escaped = " ".join(cmd)
-        raw = await self._socket_cmd(
-            sock, f"cd {self.config.workspace_dir} && {escaped}; echo EXIT:$?"
+    async def exec(self, sid: str, command: list[str]) -> SandboxResult:
+        socket = self._socket_for(sid)
+        raw = await self._send_via_socket(
+            socket,
+            f"cd {self.config.workspace_dir} && {' '.join(command)}; echo {_EXIT_MARKER}$?",
         )
-        lines = raw.split("\n")
         exit_code = 0
-        out_lines: list[str] = []
-        for line in lines:
-            if line.startswith("EXIT:"):
-                exit_code = int(line.removeprefix("EXIT:"))
+        output_lines: list[str] = []
+        for line in raw.split("\n"):
+            if line.startswith(_EXIT_MARKER):
+                exit_code = int(line.removeprefix(_EXIT_MARKER))
             else:
-                out_lines.append(line)
-        return SandboxResult(exit_code=exit_code, stdout="\n".join(out_lines), stderr="")
+                output_lines.append(line)
+        return SandboxResult(exit_code=exit_code, stdout="\n".join(output_lines), stderr="")
 
     async def destroy(self, sid: str) -> None:
-        sock = self._socket_for(sid)
+        socket = self._socket_for(sid)
         try:
-            await self._socket_cmd(sock, "sudo poweroff", timeout=5.0)
+            await self._send_via_socket(socket, "sudo poweroff", timeout=5.0)
         except Exception:
             pass
-        sock.unlink(missing_ok=True)
+        socket.unlink(missing_ok=True)
 
     async def is_healthy(self, sid: str) -> bool:
-        sock = self._socket_for(sid)
-        if not sock.exists():
+        socket = self._socket_for(sid)
+        if not socket.exists():
             return False
         try:
-            r = await self._socket_cmd(sock, "echo ok", timeout=2.0)
-            return "ok" in r
+            response = await self._send_via_socket(socket, "echo ok", timeout=2.0)
+            return "ok" in response
         except Exception:
             return False
 
     def _socket_for(self, sid: str) -> Path:
         return self.serial_socket_dir / f"{sid}.sock"
 
-    async def _socket_cmd(self, sock: Path, cmd: str, timeout: float = 30.0) -> str:
+    def _network_flags(self) -> list[str]:
+        return ["-net", "none"] if not self.config.network_enabled else []
+
+    async def _tar_directory(self, path: Path) -> bytes:
         proc = await asyncio.create_subprocess_exec(
-            "socat", "-", f"UNIX-CONNECT:{sock}",
+            "tar", "-czf", "-", "-C", str(path.parent), path.name,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        data, _ = await proc.communicate()
+        return data
+
+    async def _send_via_socket(
+        self, socket: Path, command: str, timeout: float = _COMMAND_TIMEOUT_SECONDS,
+    ) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            _SOCAT_BINARY, "-", f"UNIX-CONNECT:{socket}",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         try:
             stdout, _ = await asyncio.wait_for(
-                proc.communicate(input=(cmd + "\n").encode()), timeout=timeout
+                proc.communicate(input=(command + "\n").encode()), timeout=timeout,
             )
             return stdout.decode()
         except asyncio.TimeoutError:
-            proc.kill(); await proc.wait()
+            proc.kill()
+            await proc.wait()
             raise
 
-    async def _wait_healthy(self, sid: str, sock: Path, timeout: float = 90.0) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while loop.time() < deadline:
-            if sock.exists():
+    async def _wait_for_boot(self, sid: str, socket: Path) -> None:
+        deadline = asyncio.get_running_loop().time() + _BOOT_TIMEOUT_SECONDS
+        while asyncio.get_running_loop().time() < deadline:
+            if socket.exists():
                 try:
                     if await self.is_healthy(sid):
                         return
                 except Exception:
                     pass
-            await asyncio.sleep(1.0)
-        raise TimeoutError(f"QEMU {sid} not responding within {timeout}s")
+            await asyncio.sleep(_BOOT_POLL_SECONDS)
+        raise TimeoutError(f"QEMU {sid} not responding within {_BOOT_TIMEOUT_SECONDS}s")

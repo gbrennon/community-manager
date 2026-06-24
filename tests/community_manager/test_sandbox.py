@@ -11,7 +11,7 @@ from community_manager.sandbox.protocol import (
     SandboxConfig, SandboxProvider, SandboxResult,
 )
 from community_manager.sandbox.reviewer import (
-    IssueReviewer, ReviewResult, _is_crash, _step_to_cline_cmd, _extract_steps,
+    IssueReviewer, ReviewResult, process_exited_with_crash, convert_step_to_cline_command, parse_steps_from_issue_body,
 )
 from tests.conftest import FakeGitHubIssueFetcher
 
@@ -82,22 +82,22 @@ class HappyProvider(SandboxProvider):
 
 class TestIsCrash:
     def test_ok(self) -> None:
-        assert not _is_crash(SandboxResult(exit_code=0, stdout="", stderr=""))
+        assert not process_exited_with_crash(SandboxResult(exit_code=0, stdout="", stderr=""))
 
     def test_sigsegv(self) -> None:
-        assert _is_crash(SandboxResult(exit_code=139, stdout="", stderr=""))
+        assert process_exited_with_crash(SandboxResult(exit_code=139, stdout="", stderr=""))
 
     def test_core_dumped_text(self) -> None:
-        assert _is_crash(SandboxResult(exit_code=1, stdout="", stderr="core dumped"))
+        assert process_exited_with_crash(SandboxResult(exit_code=1, stdout="", stderr="core dumped"))
 
 
 class TestStepToCmd:
     def test_open_cline(self) -> None:
-        cmd = _step_to_cline_cmd("1. open cline")
+        cmd = convert_step_to_cline_command("1. open cline")
         assert "timeout" in cmd[0]
 
     def test_ctrl_c(self) -> None:
-        cmd = _step_to_cline_cmd("2. press ctrl+c")
+        cmd = convert_step_to_cline_command("2. press ctrl+c")
         assert "kill" in " ".join(cmd)
 
 
@@ -109,12 +109,12 @@ class TestExtractSteps:
 3. raises core dumped error
 
 ### What happened"""
-        steps = _extract_steps(body)
+        steps = parse_steps_from_issue_body(body)
         assert len(steps) == 3
         assert "open cline" in steps[0]
 
     def test_empty_body(self) -> None:
-        assert _extract_steps("") == []
+        assert parse_steps_from_issue_body("") == []
 
 
 # ======================= Integration: real issue + crash sim ==================
@@ -218,7 +218,7 @@ class TestReviewRealIssueCrashSim:
         reviewer = IssueReviewer(provider=HappyProvider(), fetcher=fetcher)
         result = await reviewer.review(REAL_ISSUE_URL)
         out = tmp_path / "findings.md"
-        written = reviewer.write_report(result, out=out)
+        written = reviewer.write_report(result, output_path=out)
         assert written.exists()
         content = written.read_text()
         assert REAL_ISSUE_URL in content

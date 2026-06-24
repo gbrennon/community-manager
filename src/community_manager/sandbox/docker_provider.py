@@ -1,4 +1,4 @@
-"""Docker sandbox provider — network-isolated TypeScript containers."""
+"""Sandbox provider backed by Docker or Podman."""
 
 from __future__ import annotations
 
@@ -12,17 +12,18 @@ from community_manager.sandbox.protocol import (
     SandboxResult,
 )
 
+_HEALTH_CHECK_POLL_SECONDS = 0.3
+_DEFAULT_HEALTH_TIMEOUT_SECONDS = 30.0
+_STATE_RUNNING_MARKERS = frozenset({"true", "running"})
+
 
 class DockerProvider(SandboxProvider):
-    """Launch and manage network‑isolated Docker / Podman containers.
-
-    Uses the ``node:22-slim`` image with TypeScript tooling pre‑installed
-    so that ``cline`` can run inside.
+    """Network-isolated container sandbox — works with Docker and Podman.
 
     Set ``binary`` to ``"podman"`` for rootless Podman support.
     """
 
-    docker_image: str = "cline-review-sandbox"
+    image: str = "cline-review-sandbox"
     binary: str = "docker"
 
     def __init__(
@@ -33,24 +34,8 @@ class DockerProvider(SandboxProvider):
 
     async def launch(self) -> str:
         sandbox_id = f"cline-issue-{uuid.uuid4().hex[:12]}"
-        network = [] if self.config.network_enabled else ["--network", "none"]
-
-        proc = await asyncio.create_subprocess_exec(
-            self.binary, "run", "--detach", "--rm",
-            *network,
-            "--memory", self.config.memory,
-            "--cpus", str(self.config.cpus),
-            "--name", sandbox_id,
-            self.docker_image,
-            "sleep", "infinity",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"{self.binary} launch failed: {stderr.decode().strip()}")
-
-        await self._wait_healthy(sandbox_id)
+        await self._start_container(sandbox_id)
+        await self._ensure_healthy(sandbox_id, _DEFAULT_HEALTH_TIMEOUT_SECONDS)
         return sandbox_id
 
     async def copy_in(self, sandbox_id: str, host_path: Path, sandbox_path: Path) -> None:
@@ -84,22 +69,36 @@ class DockerProvider(SandboxProvider):
         await proc.wait()
 
     async def is_healthy(self, sandbox_id: str) -> bool:
-        # Podman: --format uses .State.Status (not .State.Running alias)
-        fmt = "{{.State.Status}}" if self.binary == "podman" else "{{.State.Running}}"
+        state_format = "{{.State.Status}}" if self.binary == "podman" else "{{.State.Running}}"
         proc = await asyncio.create_subprocess_exec(
-            self.binary, "inspect", "--format", fmt, sandbox_id,
+            self.binary, "inspect", "--format", state_format, sandbox_id,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await proc.communicate()
-        val = stdout.decode().strip()
-        return val in ("true", "running")
+        return stdout.decode().strip() in _STATE_RUNNING_MARKERS
 
-    async def _wait_healthy(self, sandbox_id: str, timeout: float = 30.0) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while loop.time() < deadline:
+    async def _start_container(self, sandbox_id: str) -> None:
+        network_flag = [] if self.config.network_enabled else ["--network", "none"]
+        proc = await asyncio.create_subprocess_exec(
+            self.binary, "run", "--detach", "--rm",
+            *network_flag,
+            "--memory", self.config.memory,
+            "--cpus", str(self.config.cpus),
+            "--name", sandbox_id,
+            self.image,
+            "sleep", "infinity",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"{self.binary} launch failed: {stderr.decode().strip()}")
+
+    async def _ensure_healthy(self, sandbox_id: str, timeout: float) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
             if await self.is_healthy(sandbox_id):
                 return
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(_HEALTH_CHECK_POLL_SECONDS)
         raise TimeoutError(f"Sandbox {sandbox_id} not healthy within {timeout}s")

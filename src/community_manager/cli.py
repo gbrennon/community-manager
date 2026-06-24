@@ -9,20 +9,23 @@ from typing import Sequence
 from community_manager.fetcher import GitHubIssueFetcher
 from community_manager.sandbox.reviewer import IssueReviewer
 
-_CONTAINER_CANDIDATES = ("podman", "docker")
+_CONTAINER_RUNTIMES = ("podman", "docker")
+_QEMU_BINARY = "qemu-system-x86_64"
 
 
-def _detect_container_runtime() -> str:
-    """Return the best available container runtime (podman > docker)."""
-    for c in _CONTAINER_CANDIDATES:
-        if shutil.which(c):
-            return c
+def _first_available_container_runtime() -> str:
+    for candidate in _CONTAINER_RUNTIMES:
+        if shutil.which(candidate):
+            return candidate
     return "docker"
 
 
-def _detect_qemu() -> bool:
-    """Check whether qemu-system-x86_64 is on PATH."""
-    return shutil.which("qemu-system-x86_64") is not None
+def _qemu_is_installed() -> bool:
+    return shutil.which(_QEMU_BINARY) is not None
+
+
+def _any_container_runtime_installed() -> bool:
+    return _first_available_container_runtime() != "docker" or shutil.which("docker")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,77 +110,84 @@ def _run_review(
 
     config = SandboxConfig()
 
-    # Resolve provider: prefer containers (lighter, no disk image needed).
-    # Fall back to QEMU only when no container runtime is available.
-    has_container = _detect_container_runtime() != "docker" or shutil.which("docker")
-    has_qemu = _detect_qemu()
-
-    if provider == "auto":
-        if has_container:
-            provider = "container"
-        elif has_qemu:
-            provider = "qemu"
-        else:
-            print(
-                "Error: no sandbox backend found. Install podman, docker,"
-                " or qemu-system-x86_64.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-    if container_runtime == "auto":
-        container_runtime = _detect_container_runtime()
+    provider = _resolve_provider(provider)
+    container_runtime = _resolve_container_runtime(container_runtime)
 
     if provider == "qemu":
-        if not has_qemu:
-            print("Error: qemu-system-x86_64 not found on PATH", file=sys.stderr)
-            sys.exit(1)
-        from community_manager.sandbox.qemu_provider import QemuProvider
-
-        qemu_prov = QemuProvider(config=config)
-        if not qemu_prov.disk_image.exists():
-            print(
-                f"Error: QEMU disk image not found at {qemu_prov.disk_image}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        backend_label = "qemu"
-        prov: object = qemu_prov
+        sandbox, backend_label = _build_qemu_provider(config)
     else:
-        if not shutil.which(container_runtime):
-            print(
-                f"Error: {container_runtime} not found on PATH."
-                " Install podman or docker.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        prov = DockerProvider(config=config, binary=container_runtime)
-        backend_label = container_runtime
+        sandbox, backend_label = _build_container_provider(config, container_runtime)
 
     reviewer = IssueReviewer(
-        provider=prov,  # type: ignore[arg-type]
-        fetcher=fetcher or GitHubIssueFetcher(),
+        provider=sandbox, fetcher=fetcher or GitHubIssueFetcher(),
     )
 
-    async def _do() -> None:
+    async def review_and_print() -> None:
         print(f"Reviewing {url} ...")
         print(f"Sandbox: {backend_label}")
-        result = await reviewer.review(url)
-        print()
-        print("=" * 60)
-        print(f"Title:       {result.issue_title}")
-        print(f"Sandbox:     {result.sandbox_id}")
-        print(f"Reproduced:  {result.reproduced}")
-        print(f"Crash:       {result.crash_observed}")
-        print()
-        print("VERDICT:")
-        print(result.verdict)
-        print()
-        if result.errors:
-            print("Errors:")
-            for e in result.errors:
-                print(f"  - {e}")
-        reviewer.write_report(result)
-        print(f"\nReport written to {out}")
+        verdict = await reviewer.review(url)
+        _print_verdict(verdict)
+        reviewer.write_report(verdict, Path(out))
 
-    asyncio.run(_do())
+    asyncio.run(review_and_print())
+
+
+def _resolve_provider(raw: str) -> str:
+    if raw != "auto":
+        return raw
+    if _any_container_runtime_installed():
+        return "container"
+    if _qemu_is_installed():
+        return "qemu"
+    print(
+        "Error: no sandbox backend found. Install podman, docker,"
+        " or qemu-system-x86_64.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _resolve_container_runtime(raw: str) -> str:
+    return _first_available_container_runtime() if raw == "auto" else raw
+
+
+def _build_qemu_provider(config: SandboxConfig) -> tuple[object, str]:
+    if not _qemu_is_installed():
+        print("Error: qemu-system-x86_64 not found on PATH", file=sys.stderr)
+        sys.exit(1)
+    from community_manager.sandbox.qemu_provider import QemuProvider
+
+    qemu = QemuProvider(config=config)
+    if not qemu.disk_image.exists():
+        print(f"Error: QEMU disk image not found at {qemu.disk_image}", file=sys.stderr)
+        sys.exit(1)
+    return qemu, "qemu"
+
+
+def _build_container_provider(config: SandboxConfig, runtime: str) -> tuple[object, str]:
+    if not shutil.which(runtime):
+        print(
+            f"Error: {runtime} not found on PATH. Install podman or docker.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    from community_manager.sandbox.docker_provider import DockerProvider
+
+    return DockerProvider(config=config, binary=runtime), runtime
+
+
+def _print_verdict(result: object) -> None:
+    print()
+    print("=" * 60)
+    print(f"Title:       {result.issue_title}")
+    print(f"Sandbox:     {result.sandbox_id}")
+    print(f"Reproduced:  {result.reproduced}")
+    print(f"Crash:       {result.crash_observed}")
+    print()
+    print("VERDICT:")
+    print(result.verdict)
+    print()
+    if result.errors:
+        print("Errors:")
+        for error in result.errors:
+            print(f"  - {error}")
