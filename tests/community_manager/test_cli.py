@@ -13,11 +13,11 @@ class TestBuildParser:
     def test_program_name_and_description(self) -> None:
         parser = build_parser()
         assert parser.prog == "communiy-manager"
-        assert "Fetch public GitHub issues" in parser.description or ""
+        assert "Cline" in parser.description or ""
 
     def test_url_argument_present(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["https://github.com/a/b/issues/1"])
+        args = parser.parse_args(["fetch", "https://github.com/a/b/issues/1"])
         assert args.url == "https://github.com/a/b/issues/1"
 
     def test_help_output(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -27,7 +27,8 @@ class TestBuildParser:
         assert exc_info.value.code == 0
         output = capsys.readouterr().out
         assert "communiy-manager" in output
-        assert "GitHub issue URL" in output
+        assert "review" in output
+        assert "fetch" in output
 
 
 class TestRun:
