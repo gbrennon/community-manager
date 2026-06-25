@@ -23,7 +23,7 @@ class CrashSimProvider(SandboxProvider):
         self._boxes: dict[str, list[str]] = {}
         self._commands: dict[str, list[list[str]]] = {}
 
-    async def launch(self) -> str:
+    async def launch(self, **kwargs: object) -> str:
         sid = "crash-sim-1"
         self._boxes[sid] = []
         self._commands[sid] = []
@@ -32,7 +32,7 @@ class CrashSimProvider(SandboxProvider):
     async def copy_in(self, sid: str, host: Path, sandbox: Path) -> None:
         self._boxes.setdefault(sid, []).append(str(host))
 
-    async def exec(self, sid: str, cmd: list[str]) -> SandboxResult:
+    async def exec(self, sid: str, cmd: list[str], *, tty: bool = False, timeout: float = 120.0) -> SandboxResult:
         self._commands.setdefault(sid, []).append(cmd)
         joined = " ".join(cmd)
         if "kill" in joined:
@@ -57,7 +57,7 @@ class HappyProvider(SandboxProvider):
         self._boxes: dict[str, list[str]] = {}
         self._commands: dict[str, list[list[str]]] = {}
 
-    async def launch(self) -> str:
+    async def launch(self, **kwargs: object) -> str:
         sid = "fake-1"
         self._boxes[sid] = []
         self._commands[sid] = []
@@ -66,7 +66,7 @@ class HappyProvider(SandboxProvider):
     async def copy_in(self, sid: str, host: Path, sandbox: Path) -> None:
         pass
 
-    async def exec(self, sid: str, cmd: list[str]) -> SandboxResult:
+    async def exec(self, sid: str, cmd: list[str], *, tty: bool = False, timeout: float = 120.0) -> SandboxResult:
         self._commands.setdefault(sid, []).append(cmd)
         return SandboxResult(exit_code=0, stdout="ok", stderr="")
 
@@ -180,17 +180,12 @@ class TestReviewRealIssueCrashSim:
 
     @pytest.mark.asyncio
     async def test_concurrent_reviews_use_correct_binary(self) -> None:
-        from community_manager.sandbox.docker_provider import DockerProvider
-
-        podman = DockerProvider(config=SandboxConfig(), binary="podman")
+        # Uses HappyProvider so no real containers are launched.
         fetcher = FakeGitHubIssueFetcher()
+        body = "### Steps to reproduce\n1. open cline\n2. press ctrl+c\n"
         for _ in range(3):
-            fetcher.set_payload(
-                title="test",
-                body="### Steps to reproduce\n1. open cline\n2. press ctrl+c\n",
-                state=IssueState.OPEN,
-            )
-        reviewer = IssueReviewer(provider=podman, fetcher=fetcher)
+            fetcher.set_payload(title="test", body=body, state=IssueState.OPEN)
+        reviewer = IssueReviewer(provider=HappyProvider(), fetcher=fetcher)
         results = await reviewer.review_many(
             [REAL_ISSUE_URL] * 3, max_concurrent=2,
         )
