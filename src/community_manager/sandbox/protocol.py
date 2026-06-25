@@ -40,8 +40,21 @@ class SandboxProvider(ABC):
         """Copy a file or directory from the host into the sandbox."""
 
     @abstractmethod
-    async def exec(self, sandbox_id: str, command: list[str]) -> SandboxResult:
-        """Run a command inside the sandbox."""
+    async def exec(
+        self,
+        sandbox_id: str,
+        command: list[str],
+        *,
+        tty: bool = False,
+        timeout: float = 120.0,
+    ) -> SandboxResult:
+        """Run a command inside the sandbox.
+
+        tty=True wraps the command with ``script -q`` inside the container so
+        programs that check isatty() see a real terminal.  The outer exec
+        stays non-interactive (no ``-t`` flag) so the process is always
+        bounded by *timeout* and never freezes the caller.
+        """
 
     @abstractmethod
     async def destroy(self, sandbox_id: str) -> None:
