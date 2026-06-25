@@ -14,6 +14,13 @@ from community_manager.sandbox.docker_provider import DockerProvider
 
 _CRASH_EXIT_CODES = frozenset({134, 139, 124, 137})
 _CRASH_TEXT_MARKERS = ("core dumped", "segmentation fault", "signal")
+# Markers that indicate cline couldn't start at all — sandbox env issue, not the bug.
+_TTY_ERROR_MARKERS = (
+    "interactive mode requires a tty",
+    "requires a tty",
+    "not a tty",
+    "no tty",
+)
 _FALLBACK_STEPS = ("1. open cline", "2. press ctrl+c", "3. observe crash")
 _STEP_BODY_REGEX = re.compile(
     r"### Steps to reproduce\s*\n((?:\d+\.\s*.+\n?)+)", re.IGNORECASE,
@@ -27,6 +34,11 @@ VERDICT_CONFIRMED = (
 )
 VERDICT_NOT_REPRODUCED = "Cannot reproduce — all steps ran without crash."
 VERDICT_NO_CRASH = "Issue reproduced but no crash observed in this environment."
+VERDICT_INCONCLUSIVE = (
+    "**INCONCLUSIVE**: cline could not start inside the sandbox "
+    "(TTY/terminal error). The sandbox environment cannot reproduce "
+    "this issue class — manual verification required."
+)
 
 
 @dataclass
@@ -75,15 +87,20 @@ class IssueReviewer:
         self._log(f"Steps parsed: {len(reproduction_steps)}", reproduction_steps)
 
         self._log("Launching sandbox...")
-        sandbox_id = await self.provider.launch()
+        sandbox_id = await self.provider.launch(cline_version=issue.cline_version)
         self._log(f"Sandbox launched: {sandbox_id}")
+
+        from_cache = getattr(self.provider, "launched_from_cache", False)
+        if from_cache:
+            self._log(f"Cache hit — skipping npm install for cline@{issue.cline_version}")
 
         result = ReviewResult(
             issue_url=issue_url, issue_title=issue.title,
             sandbox_id=sandbox_id, success=False,
         )
         try:
-            await self._install_cline(sandbox_id, issue.cline_version)
+            if not from_cache:
+                await self._install_cline(sandbox_id, issue.cline_version)
             self._log("Network: disconnecting...")
             await self.provider.disconnect_network(sandbox_id)
             self._log("Network: severed")
@@ -138,21 +155,61 @@ class IssueReviewer:
 
     async def _install_cline(self, sandbox_id: str, cline_version: str) -> None:
         package = f"cline@{cline_version}" if cline_version else "cline"
-        self._log(f"Installing {package} (this may take ~30s)...")
-        result = await self.provider.exec(
-            sandbox_id,
-            ["npm", "install", "-g", package],
-        )
-        if result.exit_code != 0 and "ETARGET" in result.stderr and cline_version:
-            self._log(f"Version {cline_version} not found, falling back to latest")
+        # cline bundles bun (~90 MB) + its own JS (~60 MB): real-world installs
+        # take 2–5 min on a cold node:22-slim image depending on npm registry speed.
+        self._log(f"Installing {package} (expected: 2–5 min, cline bundles bun ~150 MB)...")
+        result = await self._npm_install_streaming(sandbox_id, package)
+        if result.exit_code != 0 and "ETARGET" in result.stdout and cline_version:
+            self._log(f"Version {cline_version} not found on registry, falling back to latest")
             package = "cline"
-            result = await self.provider.exec(
-                sandbox_id,
-                ["npm", "install", "-g", package],
-            )
+            result = await self._npm_install_streaming(sandbox_id, package)
         if result.exit_code != 0:
-            raise RuntimeError(f"npm install -g {package} failed: {result.stderr}")
-        self._log(f"{package} installed")
+            raise RuntimeError(f"npm install -g {package} failed:\n{result.stdout[-800:]}")
+        self._log(f"{package} installed successfully")
+        await self._commit_image(sandbox_id, cline_version)
+
+    async def _commit_image(self, sandbox_id: str, cline_version: str) -> None:
+        """Snapshot the container into a reusable cached image if possible."""
+        from community_manager.sandbox.docker_provider import DockerProvider
+        if not isinstance(self.provider, DockerProvider):
+            return
+        if self.provider.image_cache is None:
+            return
+        self._log(f"Committing image for cline@{cline_version} ...")
+        await self.provider.image_cache.commit(sandbox_id, cline_version)
+
+    async def _npm_install_streaming(self, sandbox_id: str, package: str) -> Any:
+        from community_manager.sandbox.docker_provider import DockerProvider
+
+        command = ["npm", "install", "-g", "--foreground-scripts", package]
+
+        if not isinstance(self.provider, DockerProvider):
+            # non-Docker providers: fall back to buffered exec
+            return await self.provider.exec(sandbox_id, command)
+
+        def _on_line(line: str) -> None:
+            # surface npm progress lines (added, progress, warn, error) and
+            # any non-empty line while in debug mode
+            low = line.lower()
+            important = any(tok in low for tok in ("added", "warn", "err!", "error", "npm"))
+            if self.debug and (important or line.strip()):
+                self._log(f"  npm › {line}")
+
+        def _on_tick(elapsed: float) -> None:
+            mins = int(elapsed) // 60
+            secs = int(elapsed) % 60
+            self._log(
+                f"  npm still running … {mins}m{secs:02d}s elapsed"
+                f" (container {sandbox_id[:20]})"
+            )
+
+        return await self.provider.exec_streaming(
+            sandbox_id,
+            command,
+            on_line=_on_line,
+            tick_interval=15.0,
+            on_tick=_on_tick,
+        )
 
     async def _execute_steps(
         self, sandbox_id: str, steps: list[str],
@@ -162,18 +219,27 @@ class IssueReviewer:
         every_step_ran = True
 
         for index, step_description in enumerate(steps, start=1):
-            record: dict[str, Any] = {
-                "step": index, "description": step_description, "ran": False,
-            }
             command = convert_step_to_cline_command(step_description)
+            record: dict[str, Any] = {
+                "step": index, "description": step_description,
+                "command": " ".join(command), "ran": False,
+            }
             self._log(f"Step {index}: {command}")
             try:
-                result = await self.provider.exec(sandbox_id, command)
+                result = await self.provider.exec(sandbox_id, command, tty=True)
                 record["exit_code"] = result.exit_code
                 record["stdout"] = result.stdout[-2000:]
                 record["stderr"] = result.stderr[-2000:]
-                record["ran"] = True
                 self._log(f"  exit={result.exit_code} stdout={result.stdout[:100]}")
+
+                combined = (result.stdout + result.stderr).lower()
+                if any(m in combined for m in _TTY_ERROR_MARKERS):
+                    record["tty_error"] = True
+                    record["ran"] = False
+                    every_step_ran = False
+                    self._log("  <<< INCONCLUSIVE: cline could not start (TTY error) >>>")
+                else:
+                    record["ran"] = True
 
                 if process_exited_with_crash(result):
                     any_crash = True
@@ -236,6 +302,8 @@ def process_exited_with_crash(result: Any) -> bool:
 
 
 def render_verdict(result: ReviewResult) -> str:
+    if result.steps_executed and all(s.get("tty_error") for s in result.steps_executed):
+        return VERDICT_INCONCLUSIVE
     if not result.reproduced:
         return VERDICT_NOT_REPRODUCED
     if result.crash_observed:
@@ -250,16 +318,24 @@ def render_findings(title: str, body: str, result: ReviewResult) -> str:
     lines.append(f"**Body excerpt:** {body[:200]}...")
     lines.append("")
     lines.append("## Reproduction")
-    lines.append(f"- Steps: {len(result.steps_executed)}")
-    lines.append(f"- All ran: {result.reproduced}")
+    lines.append(f"- Steps executed: {len(result.steps_executed)}")
+    lines.append(f"- All steps ran: {result.reproduced}")
     lines.append(f"- Crash detected: {result.crash_observed}")
     for record in result.steps_executed:
         status = _step_status_label(record)
-        lines.append(f"\n### Step {record['step']}: {record['description']}  [{status}]")
+        exit_code = record.get("exit_code", "—")
+        lines.append(f"\n### Step {record['step']} [{status}]")
+        lines.append(f"**Description:** {record['description']}")
+        lines.append(f"**Command:** `{record.get('command', '—')}`")
+        lines.append(f"**Exit code:** `{exit_code}`")
+        if record.get("error"):
+            lines.append(f"**Error:** {record['error']}")
         for stream in ("stdout", "stderr"):
-            if record.get(stream):
+            output = record.get(stream, "").strip()
+            if output:
+                lines.append(f"**{stream}:**")
                 lines.append("```")
-                lines.append(record[stream][:500])
+                lines.append(output[:500])
                 lines.append("```")
         if record.get("core_dump"):
             lines.append("**Core dump:**")
@@ -272,6 +348,8 @@ def render_findings(title: str, body: str, result: ReviewResult) -> str:
 def _step_status_label(record: dict[str, Any]) -> str:
     if record.get("crashed"):
         return "CRASHED"
+    if record.get("tty_error"):
+        return "INCONCLUSIVE (no TTY)"
     if record["ran"]:
         return "OK"
     return "SKIPPED"
