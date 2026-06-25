@@ -23,7 +23,7 @@ class CrashSimProvider(SandboxProvider):
         self._boxes: dict[str, list[str]] = {}
         self._commands: dict[str, list[list[str]]] = {}
 
-    async def launch(self) -> str:
+    async def launch(self, **kwargs: object) -> str:
         sid = "crash-sim-1"
         self._boxes[sid] = []
         self._commands[sid] = []
@@ -32,7 +32,7 @@ class CrashSimProvider(SandboxProvider):
     async def copy_in(self, sid: str, host: Path, sandbox: Path) -> None:
         self._boxes.setdefault(sid, []).append(str(host))
 
-    async def exec(self, sid: str, cmd: list[str]) -> SandboxResult:
+    async def exec(self, sid: str, cmd: list[str], *, tty: bool = False, timeout: float = 120.0) -> SandboxResult:
         self._commands.setdefault(sid, []).append(cmd)
         joined = " ".join(cmd)
         if "kill" in joined:
@@ -57,7 +57,7 @@ class HappyProvider(SandboxProvider):
         self._boxes: dict[str, list[str]] = {}
         self._commands: dict[str, list[list[str]]] = {}
 
-    async def launch(self) -> str:
+    async def launch(self, **kwargs: object) -> str:
         sid = "fake-1"
         self._boxes[sid] = []
         self._commands[sid] = []
@@ -66,7 +66,7 @@ class HappyProvider(SandboxProvider):
     async def copy_in(self, sid: str, host: Path, sandbox: Path) -> None:
         pass
 
-    async def exec(self, sid: str, cmd: list[str]) -> SandboxResult:
+    async def exec(self, sid: str, cmd: list[str], *, tty: bool = False, timeout: float = 120.0) -> SandboxResult:
         self._commands.setdefault(sid, []).append(cmd)
         return SandboxResult(exit_code=0, stdout="ok", stderr="")
 
@@ -153,6 +153,20 @@ class TestReviewRealIssueCrashSim:
         assert all(r.success for r in results)
 
     @pytest.mark.asyncio
+    async def test_unknown_version_falls_back_to_latest(self) -> None:
+        fetcher = FakeGitHubIssueFetcher()
+        fetcher.set_payload(
+            title="issue with bogus version",
+            body="### Steps to reproduce\n1. open cline\n2. press ctrl+c\n",
+            state=IssueState.OPEN,
+        )
+        provider = CrashSimProvider()
+        reviewer = IssueReviewer(provider=provider, fetcher=fetcher)
+        result = await reviewer.review(REAL_ISSUE_URL)
+        assert result.success is True
+        assert result.crash_observed is True
+
+    @pytest.mark.asyncio
     async def test_write_report(self, tmp_path: Path) -> None:
         fetcher = FakeGitHubIssueFetcher()
         fetcher.set_payload(title="test", body="body", state=IssueState.OPEN)
@@ -163,3 +177,17 @@ class TestReviewRealIssueCrashSim:
         assert written.exists()
         content = written.read_text()
         assert REAL_ISSUE_URL in content
+
+    @pytest.mark.asyncio
+    async def test_concurrent_reviews_use_correct_binary(self) -> None:
+        # Uses HappyProvider so no real containers are launched.
+        fetcher = FakeGitHubIssueFetcher()
+        body = "### Steps to reproduce\n1. open cline\n2. press ctrl+c\n"
+        for _ in range(3):
+            fetcher.set_payload(title="test", body=body, state=IssueState.OPEN)
+        reviewer = IssueReviewer(provider=HappyProvider(), fetcher=fetcher)
+        results = await reviewer.review_many(
+            [REAL_ISSUE_URL] * 3, max_concurrent=2,
+        )
+        assert len(results) == 3
+        assert all(r.success for r in results)
