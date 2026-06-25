@@ -8,6 +8,7 @@ import sys
 from typing import Sequence
 
 from community_manager.fetcher import GitHubIssueFetcher
+from community_manager.notifications import build_notifier
 from community_manager.sandbox.reviewer import IssueReviewer
 from community_manager.sandbox.reviewer import ReviewResult
 
@@ -72,6 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--concurrent", type=int, default=4,
         help="Max parallel reviews (default: 4)",
     )
+    review_cmd.add_argument(
+        "--no-cache", action="store_true",
+        help="Disable the image cache — always do a fresh npm install",
+    )
 
     batch_cmd = sub.add_parser(
         "batch", help="Review a consecutive range of issues",
@@ -131,6 +136,7 @@ def run(
             container_runtime=args.container_runtime,
             out=args.out,
             concurrent=args.concurrent,
+            no_cache=getattr(args, "no_cache", False),
             fetcher=fetcher,
         )
     elif args.command == "batch":
@@ -161,14 +167,23 @@ def _run_fetch(url: str, *, fetcher: GitHubIssueFetcher | None = None) -> None:
     print(issue.body or "(empty body)")
 
 
+def _normalize_repo(repo: str) -> str:
+    """Normalize --repo to 'owner/repo' form, accepting full GitHub URLs too."""
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if repo.startswith(prefix):
+            return repo[len(prefix):].rstrip("/")
+    return repo.rstrip("/")
+
+
 def _resolve_targets_to_urls(targets: list[str], repo: str | None) -> list[str]:
     """Convert target list (URLs or bare IDs) into full GitHub URLs."""
+    normalized_repo = _normalize_repo(repo) if repo else None
     result: list[str] = []
     for t in targets:
         if t.startswith("https://"):
             result.append(t)
-        elif repo:
-            result.append(f"https://github.com/{repo}/issues/{t}")
+        elif normalized_repo:
+            result.append(f"https://github.com/{normalized_repo}/issues/{t}")
         else:
             print(
                 f"Error: '{t}' is not a full URL and --repo was not set.",
@@ -187,6 +202,7 @@ def _run_review(
     container_runtime: str = "auto",
     out: str = "verdicts.md",
     concurrent: int = 4,
+    no_cache: bool = False,
     fetcher: GitHubIssueFetcher | None = None,
 ) -> None:
     urls = _resolve_targets_to_urls(targets, repo)
@@ -194,7 +210,7 @@ def _run_review(
 
     provider = _resolve_provider(provider)
     container_runtime = _resolve_container_runtime(container_runtime)
-    sandbox, backend_label = _build_sandbox(provider, container_runtime)
+    sandbox, backend_label = _build_sandbox(provider, container_runtime, no_cache=no_cache)
 
     reviewer = IssueReviewer(
         provider=sandbox, fetcher=fetcher, debug=debug,
@@ -204,8 +220,10 @@ def _run_review(
         print(f"Reviewing {len(urls)} issue(s) ...")
         print(f"Sandbox: {backend_label} | concurrent: {concurrent}")
         results = await reviewer.review_many(urls, max_concurrent=concurrent)
-        _write_verdicts_file(results, Path(out))
+        report_path = Path(out)
+        _write_verdicts_file(results, report_path)
         _print_summary(results)
+        build_notifier().notify(results, report_path)
 
     asyncio.run(run_all())
 
@@ -237,19 +255,23 @@ def _run_batch_range(
         print(f"Batch reviewing {len(urls)} issues ({repo} #{start}–#{end}) ...")
         print(f"Sandbox: {backend_label} | concurrent: {concurrent}")
         results = await reviewer.review_many(urls, max_concurrent=concurrent)
-        _write_verdicts_file(results, Path(out))
+        report_path = Path(out)
+        _write_verdicts_file(results, report_path)
         _print_summary(results)
+        build_notifier().notify(results, report_path)
 
     asyncio.run(run_all())
 
 
-def _build_sandbox(provider: str, container_runtime: str) -> tuple[object, str]:
+def _build_sandbox(
+    provider: str, container_runtime: str, *, no_cache: bool = False,
+) -> tuple[object, str]:
     from community_manager.sandbox.protocol import SandboxConfig
 
     config = SandboxConfig()
     if provider == "qemu":
         return _build_qemu_provider(config)
-    return _build_container_provider(config, container_runtime)
+    return _build_container_provider(config, container_runtime, no_cache=no_cache)
 
 
 def _resolve_provider(raw: str) -> str:
@@ -284,7 +306,9 @@ def _build_qemu_provider(config: object) -> tuple[object, str]:
     return qemu, "qemu"
 
 
-def _build_container_provider(config: object, runtime: str) -> tuple[object, str]:
+def _build_container_provider(
+    config: object, runtime: str, *, no_cache: bool = False,
+) -> tuple[object, str]:
     if not shutil.which(runtime):
         print(
             f"Error: {runtime} not found on PATH. Install podman or docker.",
@@ -292,23 +316,38 @@ def _build_container_provider(config: object, runtime: str) -> tuple[object, str
         )
         sys.exit(1)
     from community_manager.sandbox.docker_provider import DockerProvider
+    from community_manager.sandbox.image_cache import ImageCache
 
-    return DockerProvider(config=config, binary=runtime), runtime
+    cache = ImageCache(binary=runtime, enabled=not no_cache)
+    return DockerProvider(config=config, binary=runtime, image_cache=cache), runtime
 
 
 def _write_verdicts_file(results: list[ReviewResult], path: Path) -> None:
     lines: list[str] = []
     lines.append("# Autonomous Review Verdicts")
     lines.append("")
-    lines.append(f"| # | Title | Reproduced | Crash | Verdict |")
-    lines.append(f"|---|-------|------------|-------|---------|")
+    lines.append("| # | Title | Steps | Reproduced | Crash | Verdict |")
+    lines.append("|---|-------|-------|------------|-------|---------|")
     for r in results:
         num = r.issue_url.rstrip("/").rsplit("/", 1)[1]
         title_short = r.issue_title[:50]
+        steps_ran = sum(1 for s in r.steps_executed if s.get("ran"))
+        steps_total = len(r.steps_executed)
         reproduced = "✅" if r.reproduced else "❌"
         crash = "💥 YES" if r.crash_observed else "no"
-        verdict_short = "CONFIRMED" if r.crash_observed else ("OK" if r.reproduced else "FAIL")
-        lines.append(f"| {num} | {title_short} | {reproduced} | {crash} | {verdict_short} |")
+        all_tty = r.steps_executed and all(s.get("tty_error") for s in r.steps_executed)
+        if all_tty:
+            verdict_short = "⚠ INCONCLUSIVE"
+        elif r.crash_observed:
+            verdict_short = "CONFIRMED"
+        elif r.reproduced:
+            verdict_short = "OK"
+        else:
+            verdict_short = "FAIL"
+        lines.append(
+            f"| [{num}](#{num}) | {title_short} | {steps_ran}/{steps_total}"
+            f" | {reproduced} | {crash} | {verdict_short} |"
+        )
 
     lines.append("")
     lines.append("---")
@@ -316,11 +355,57 @@ def _write_verdicts_file(results: list[ReviewResult], path: Path) -> None:
     for r in results:
         num = r.issue_url.rstrip("/").rsplit("/", 1)[1]
         lines.append(f"## #{num} — {r.issue_title}")
+        lines.append(f"> <{r.issue_url}>")
+        lines.append("")
         lines.append(f"**Verdict:** {r.verdict}")
+        lines.append("")
+
         if r.errors:
-            lines.append("**Errors:**")
+            lines.append("**⚠ Errors during review:**")
             for e in r.errors:
-                lines.append(f"- {e}")
+                lines.append(f"- `{e}`")
+            lines.append("")
+
+        if r.steps_executed:
+            lines.append(f"**Steps executed: {len(r.steps_executed)}**")
+            lines.append("")
+            for step in r.steps_executed:
+                status = (
+                    "💥 CRASHED" if step.get("crashed")
+                    else ("❓ INCONCLUSIVE" if step.get("tty_error")
+                    else ("✅ OK" if step.get("ran") else "⏭ SKIPPED"))
+                )
+                exit_code = step.get("exit_code", "—")
+                lines.append(
+                    f"### Step {step['step']} {status} — {step['description']}"
+                )
+                lines.append(f"- **Command:** `{step.get('command', '—')}`")
+                lines.append(f"- **Exit code:** `{exit_code}`")
+                if step.get("error"):
+                    lines.append(f"- **Error:** {step['error']}")
+                stdout = step.get("stdout", "").strip()
+                stderr = step.get("stderr", "").strip()
+                if stdout:
+                    lines.append("")
+                    lines.append("**stdout:**")
+                    lines.append("```")
+                    lines.append(stdout[:600])
+                    lines.append("```")
+                if stderr:
+                    lines.append("")
+                    lines.append("**stderr:**")
+                    lines.append("```")
+                    lines.append(stderr[:600])
+                    lines.append("```")
+                if step.get("core_dump"):
+                    lines.append("")
+                    lines.append("**Core dump:**")
+                    lines.append("```")
+                    lines.append(step["core_dump"][:400])
+                    lines.append("```")
+                lines.append("")
+
+        lines.append("---")
         lines.append("")
 
     path.write_text("\n".join(lines))
